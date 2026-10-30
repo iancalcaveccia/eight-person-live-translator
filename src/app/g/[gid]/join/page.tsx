@@ -7,27 +7,16 @@ import { BrandGlyph } from "@/components/BrandMark";
 import ConsentBox from "@/components/ConsentBox";
 import HeadsetCheck from "@/components/HeadsetCheck";
 import LanguagePicker, { type LanguageValue } from "@/components/LanguagePicker";
-
-const NAME_KEY = "interp.lastName";
-
-function readInviteToken(): string {
-  if (typeof window === "undefined") return "";
-  const m = /(?:^|[#&])k=([A-Za-z0-9_-]{16,64})/.exec(window.location.hash);
-  return m ? m[1] : "";
-}
+import { rememberName, useInviteToken, useStoredName } from "@/client/browser-values";
 
 export default function JoinPage({ params }: { params: Promise<{ gid: string }> }) {
   const { gid } = use(params);
   const router = useRouter();
-  const [inviteToken] = useState(readInviteToken);
+  const inviteToken = useInviteToken();
+  const storedName = useStoredName();
   const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [name, setName] = useState(() => {
-    try {
-      return typeof window === "undefined" ? "" : (window.localStorage.getItem(NAME_KEY) ?? "");
-    } catch {
-      return "";
-    }
-  });
+  const [editedName, setName] = useState<string | null>(null);
+  const name = editedName ?? storedName;
   const [langs, setLangs] = useState<LanguageValue>({ speakLang: "pl", listenLang: "pl", esRegion: "" });
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -49,17 +38,21 @@ export default function JoinPage({ params }: { params: Promise<{ gid: string }> 
     setBusy(true);
     setError(null);
     try {
-      await api.join(gid, { inviteToken, displayName: name.trim(), ...langs, consent: true });
-      try {
-        window.localStorage.setItem(NAME_KEY, name.trim());
-      } catch {
-        /* ignore */
-      }
+      await api.join(gid, { inviteToken: inviteToken ?? "", displayName: name.trim(), ...langs, consent: true });
+      rememberName(name.trim());
       router.replace(`/g/${gid}`);
     } catch (err) {
       setError(err instanceof ClientApiError ? err.message : "Could not join");
       setBusy(false);
     }
+  }
+
+  if (inviteToken === null) {
+    return (
+      <main className="full-center">
+        <div className="spinner" />
+      </main>
+    );
   }
 
   if (!inviteToken) {

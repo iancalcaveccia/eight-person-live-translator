@@ -337,9 +337,21 @@ test("eight people join one gathering and split 5 + 3 with no cross-group media"
   for (const i of [0, 5]) {
     await people[i].page.waitForFunction(() => window.__mesa!.snapshot().agentPresent, null, { timeout: 60_000 });
   }
-  // Talkers speak; then verify no participant ever subscribes to the other group's people.
+  // Talkers speak (P0, P2, P4 inside; P6 outside).
   await Promise.all(people.filter((_, i) => i % 2 === 0).map((p) => micOn(p.page)));
-  await people[1].page.waitForTimeout(6_000);
+  // Positive control first: translation really flows inside BOTH groups —
+  // P1 (pl) hears P0 (es) translated, P5 (en) hears P6 (es) translated.
+  await people[1].page.waitForFunction(
+    (id) => window.__mesa!.subscribed().some((s) => s.track === `tx:${id}:pl`),
+    people[0].id!,
+    { timeout: 60_000 },
+  );
+  await people[5].page.waitForFunction(
+    (id) => window.__mesa!.subscribed().some((s) => s.track === `tx:${id}:en`),
+    people[6].id!,
+    { timeout: 60_000 },
+  );
+  await people[1].page.waitForTimeout(4_000);
   const report: { participant: string; subscribedFrom: string[] }[] = [];
   for (let i = 0; i < 8; i++) {
     const subs = await people[i].page.evaluate(() => window.__mesa!.subscribed());

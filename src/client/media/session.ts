@@ -92,6 +92,8 @@ export interface MediaSnapshot {
   notice: string | null;
   noiseFilterActive: NoiseMode;
   meSpeaking: boolean;
+  /** performance.now() when the current room connected (for 'interpreter missing' detection). */
+  connectedAt: number | null;
 }
 
 export interface MediaSessionOptions {
@@ -153,6 +155,7 @@ export class MediaSession {
       notice: null,
       noiseFilterActive: "standard",
       meSpeaking: false,
+      connectedAt: null,
     };
     this.sweepTimer = setInterval(() => {
       this.captions.sweep();
@@ -276,7 +279,7 @@ export class MediaSession {
     this.reconnectAttempt = 0;
     this.applyRouting();
     this.refreshHumans();
-    this.set({ status: "connected", canPlayAudio: room.canPlaybackAudio });
+    this.set({ status: "connected", canPlayAudio: room.canPlaybackAudio, connectedAt: performance.now() });
     if (this.settings?.outputDeviceId) {
       await room.switchActiveDevice("audiooutput", this.settings.outputDeviceId).catch(() => undefined);
     }

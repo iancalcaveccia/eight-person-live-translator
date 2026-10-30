@@ -1,0 +1,14 @@
+# Never upload local secrets or local-only data with `vercel deploy`.
+.env
+.env.*
+!.env.example
+.secrets
+.data
+.vercel
+test-results
+playwright-report
+tests/e2e/fixtures/*.wav
+node_modules
+.next
+docs/codex/ALL_IN_ONE_CODEX_HANDOFF.md
+translator

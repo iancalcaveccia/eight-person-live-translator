@@ -134,7 +134,7 @@ function RoomContent({
   }, [settings.keepAwake, wakeLock]);
 
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30_000);
+    const t = setInterval(() => setNow(Date.now()), 5_000);
     return () => clearInterval(t);
   }, []);
 

@@ -8,6 +8,9 @@ export interface StatusView {
   detail?: string;
 }
 
+/** Cold start on LiveKit's free plan can take 10–20 s; beyond this, say so honestly. */
+export const INTERPRETER_MISSING_MS = 25_000;
+
 /** The compact "Live / ~N s behind / Delayed / Reconnecting" status (spec 02). */
 export function computeStatus(
   s: MediaSnapshot,
@@ -15,6 +18,7 @@ export function computeStatus(
   listenLang: string,
   translationAllowed: boolean,
   latencyP50: number | null,
+  nowMs: number = typeof performance === "undefined" ? 0 : performance.now(),
 ): StatusView {
   switch (s.status) {
     case "idle":
@@ -45,7 +49,17 @@ export function computeStatus(
   if (!translationAllowed || s.budgetState === "exceeded") {
     return { tone: "err", label: "Translation paused", detail: "Spending limit reached" };
   }
-  if (!s.agentPresent) return { tone: "warn", label: "Starting interpreter…" };
+  if (!s.agentPresent) {
+    const waited = s.connectedAt === null ? 0 : nowMs - s.connectedAt;
+    if (waited > INTERPRETER_MISSING_MS) {
+      return {
+        tone: "err",
+        label: "Interpreter unavailable",
+        detail: "The translation service has not joined. It may be busy or offline; captions and translation will start when it does.",
+      };
+    }
+    return { tone: "warn", label: "Starting interpreter…" };
+  }
   const mine = Object.values(s.translation).filter((t) => t.target === listenLang);
   if (mine.some((t) => t.state === "reconnecting" || t.state === "error")) {
     return { tone: "warn", label: "Interpreter reconnecting" };

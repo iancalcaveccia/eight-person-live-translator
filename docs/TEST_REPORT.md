@@ -28,7 +28,7 @@ Chrome 156 (headless, fake microphone from WAV files). Date: 2026-10-30.
 
 | Suite | Command | Result |
 |---|---|---|
-| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **59 passed** |
+| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **63 passed** |
 | Type-check | `pnpm typecheck` | PASS |
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
@@ -36,7 +36,7 @@ Chrome 156 (headless, fake microphone from WAV files). Date: 2026-10-30.
 | Worker unit tests | `cd translator && uv run pytest` | **98 passed**, 2 skipped (integration) |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
-| Browser E2E (real Chrome × N, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | see section 4 |
+| Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
 
 Mutation check: disabling the server's "not in this group" admission rule
 makes 5 privacy tests fail (move/replay + all four partitions), so they are
@@ -82,7 +82,33 @@ measure **our pipeline**, not Gemini.
 
 ## 4. Browser end-to-end (real Chrome, local stack, mock translator)
 
-_Filled in from `test-results/e2e-metrics.json` after the run._
+`pwsh scripts/e2e-local.ps1` starts livekit-server `--dev`, the real worker
+(`TRANSLATION_PROVIDER=mock`, 1.2 s delayed passthrough), a production build of
+the web app, and drives **real headless Chrome** whose microphones play WAV
+files (synthetic English TTS — content is irrelevant to the mock). Everything
+runs on one laptop, so CPU is saturated during the 8-person test; timings are
+pessimistic and are **not** phone or real-provider numbers.
+
+Final clean run (2026-10-30 12:23 UTC): **4 / 4 passed** in 175 s; the
+strengthened 8-person test was re-run on its own and passed again.
+
+| Test | Result | Measured |
+|---|---|---|
+| 30 s Spanish monologue → Polish listener: translated audio starts while the speaker is still talking; listener receives `tx:<speaker>:pl` and **not** the speaker's own mic | PASS | first audible translation 3.3 s / 5.7 s after mic-on in two runs (includes fake-mic start + 1.2 s mock delay); worker-onset→audible p50 1.46–1.50 s, p95 2.0–4.1 s |
+| Interruption: main speaker 34 s monologue, second person says "What? Seriously?" at 8 s, third person listens | PASS | main speaker hears the translated interjection at 11.2–11.3 s from mic-on (monologue still running, mic still live); third listener's mix: monologue ducked to gain 0.65 (on its way to 0.45), interjection 1.0 |
+| Private group: 3 people, host starts "Outside" with one guest | PASS | switch 4.1–4.5 s; outsider sees no name/members, gets 404 entering by id, receives no tracks; **old main-room token replayed from Python** → evicted by the worker after 0.7–1.8 s (`PARTICIPANT_REMOVED`); guest returns to main with one tap |
+| 8 people (ES/PL/EN) in one gathering, split 5 + 3 | PASS | 2 rooms, one interpreter job each; positive control (translation flowing in both groups) then **no participant subscribed to anyone from the other group** |
+
+Issues found and fixed by these runs: embedded DB failed on a fresh checkout
+(nested data dir); Playwright hung on Windows by deleting its output folder
+while server logs inside it were open; the worker refused new rooms when the
+shared laptop CPU was saturated (`AGENT_IGNORE_HOST_LOAD=1` for local rigs only;
+LiveKit Cloud ignores custom load functions); a React hydration mismatch on the
+join page; and the room now says "Interpreter unavailable" if no interpreter
+joins within 25 s instead of "Starting…" forever.
+
+Not covered by E2E: real Gemini/OpenAI, phones, Bluetooth, mobile networks,
+iOS Safari (headless Chrome only), Krisp filters (need LiveKit Cloud).
 
 ## 5. Not run (needs your keys or devices)
 

@@ -27,11 +27,36 @@ load_dotenv(".env.local")
 
 SETTINGS = load_settings()
 
-# Pre-warmed job processes (one per group room). The framework default in
-# production mode is one per CPU; AGENT_IDLE_PROCESSES overrides it (e.g. small
-# machines, local E2E runs).
-_idle_processes = os.environ.get("AGENT_IDLE_PROCESSES", "").strip()
-server = AgentServer(num_idle_processes=int(_idle_processes)) if _idle_processes.isdigit() else AgentServer()
+
+def _server_options() -> dict[str, object]:
+    """Optional worker sizing overrides.
+
+    AGENT_IDLE_PROCESSES: pre-warmed job processes (one job per group room);
+      the framework default in production mode is one per CPU.
+    AGENT_LOAD_THRESHOLD: CPU load (0-1, exclusive) above which the worker
+      stops accepting new rooms (framework default 0.7). Raise it on machines
+      where other processes share the CPU, e.g. local multi-browser E2E runs.
+    """
+    opts: dict[str, object] = {}
+    idle = os.environ.get("AGENT_IDLE_PROCESSES", "").strip()
+    if idle.isdigit():
+        opts["num_idle_processes"] = int(idle)
+    if os.environ.get("AGENT_IGNORE_HOST_LOAD", "").strip() == "1":
+        # Local multi-browser test rigs saturate the shared CPU and would make
+        # the worker refuse rooms. LiveKit Cloud ignores custom load functions.
+        opts["load_fnc"] = lambda: 0.0
+    threshold = os.environ.get("AGENT_LOAD_THRESHOLD", "").strip()
+    if threshold:
+        try:
+            value = float(threshold)
+            if 0 < value < 1:
+                opts["load_threshold"] = value
+        except ValueError:
+            logger.warning("ignoring invalid AGENT_LOAD_THRESHOLD")
+    return opts
+
+
+server = AgentServer(**_server_options())  # type: ignore[arg-type]
 
 
 def parse_dispatch_metadata(raw: str | None, room_name: str) -> tuple[str, str]:

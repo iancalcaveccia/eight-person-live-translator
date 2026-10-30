@@ -8,6 +8,9 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "tests/e2e",
+  // Playwright wipes outputDir at start; keep it separate from the server logs
+  // in test-results/logs, which are held open by the running stack on Windows.
+  outputDir: "test-results/playwright",
   timeout: 180_000,
   expect: { timeout: 30_000 },
   fullyParallel: false,

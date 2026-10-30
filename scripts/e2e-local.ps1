@@ -57,6 +57,8 @@ try {
   $env:TRANSLATION_PROVIDER = "mock"
   $env:CONTROL_PLANE_URL = "http://127.0.0.1:3100"
   $env:AGENT_IDLE_PROCESSES = "3"
+  $env:AGENT_LOAD_THRESHOLD = "0.99"
+  $env:AGENT_IGNORE_HOST_LOAD = "1"
   $procs += Start-Process "uv" -ArgumentList "run", "--python", $uvPython, "python", "src/agent.py", "start" -WorkingDirectory "$repo\translator" `
     -PassThru -WindowStyle Hidden -RedirectStandardOutput "$logs\worker-$stamp.log" -RedirectStandardError "$logs\worker-$stamp.err.log"
 

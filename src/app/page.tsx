@@ -7,15 +7,16 @@ import { BrandGlyph } from "@/components/BrandMark";
 import ConsentBox from "@/components/ConsentBox";
 import LanguagePicker, { type LanguageValue } from "@/components/LanguagePicker";
 import { GroupsIcon, LockIcon, WaveIcon } from "@/components/icons";
-
-const NAME_KEY = "interp.lastName";
+import { rememberName, useStoredName } from "@/client/browser-values";
 
 export default function Home() {
   const router = useRouter();
   const [cfg, setCfg] = useState<PublicConfig | null>(null);
   const [step, setStep] = useState<"intro" | "create">("intro");
   const [title, setTitle] = useState("");
-  const [name, setName] = useState(() => (typeof window === "undefined" ? "" : safeGet(NAME_KEY)));
+  const storedName = useStoredName();
+  const [editedName, setName] = useState<string | null>(null);
+  const name = editedName ?? storedName;
   const [hostCode, setHostCode] = useState("");
   const [langs, setLangs] = useState<LanguageValue>({ speakLang: "es", listenLang: "es", esRegion: "" });
   const [consent, setConsent] = useState(false);
@@ -38,7 +39,7 @@ export default function Home() {
         ...langs,
         consent: true,
       });
-      safeSet(NAME_KEY, name.trim());
+      rememberName(name.trim());
       router.push(`/g/${res.gatheringId}?invite=1`);
     } catch (err) {
       setError(err instanceof ClientApiError ? err.message : "Could not create the gathering");
@@ -158,17 +159,3 @@ function Feature({ icon, title, children }: { icon: React.ReactNode; title: stri
   );
 }
 
-function safeGet(k: string): string {
-  try {
-    return window.localStorage.getItem(k) ?? "";
-  } catch {
-    return "";
-  }
-}
-function safeSet(k: string, v: string) {
-  try {
-    window.localStorage.setItem(k, v);
-  } catch {
-    /* ignore */
-  }
-}
