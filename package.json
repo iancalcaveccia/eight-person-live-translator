@@ -1,5 +1,5 @@
 {
-  "name": "gemini-live-translate-livekit",
+  "name": "eight-person-live-interpreter",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.18.0",
@@ -10,24 +10,36 @@
     "dev:agent": "cd translator && uv run python src/agent.py dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test"
   },
   "dependencies": {
     "@livekit/components-react": "^2.9.21",
     "@livekit/components-styles": "^1.2.0",
+    "@livekit/krisp-noise-filter": "0.4.5",
     "livekit-client": "^2.19.0",
     "livekit-server-sdk": "^2.15.2",
     "next": "16.3.8",
+    "postgres": "3.4.9",
+    "qrcode": "1.5.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "server-only": "0.0.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.10",
+    "@playwright/test": "1.64.1",
     "@types/node": "^20",
+    "@types/qrcode": "1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "concurrently": "^10.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "5.0.5"
   }
 }
