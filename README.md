@@ -12,11 +12,13 @@ Built on the MIT-licensed [livekit-examples/gemini-live-translate](https://githu
 gatherings, breakout groups, a listener-side interruption mixer, cost controls,
 a mobile UI and a provider abstraction (Gemini primary, OpenAI backup).
 
-> **Status:** code and automated tests pass locally (see
-> [docs/TEST_REPORT.md](docs/TEST_REPORT.md)). Real-provider latency and every
-> real-phone / Bluetooth test are **not yet run** — they need your API keys and
-> devices. Deployment state is in the test report; no URL is claimed unless it
-> was verified.
+> **Status (2026-10-30):** all automated tests pass locally, including real
+> Chrome + LiveKit + worker end-to-end runs with a mock translator (see
+> [docs/TEST_REPORT.md](docs/TEST_REPORT.md)). The web app is deployed at
+> https://eight-person-live-translator.vercel.app but is **not functional
+> until the database, LiveKit and Gemini credentials are configured**
+> ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Real-provider latency and every
+> real-phone / Bluetooth test are **not yet run**.
 
 ## How it works (short)
 

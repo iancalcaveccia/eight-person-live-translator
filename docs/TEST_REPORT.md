@@ -120,6 +120,18 @@ iOS Safari (headless Chrome only), Krisp filters (need LiveKit Cloud).
 | 8 physical devices in one room, acoustic bleed | devices + people | same |
 | Krisp noise / voice-focus filter | requires LiveKit Cloud | toggle in Settings once deployed |
 
-## 6. Deployment
+## 6. Deployment (verified 2026-10-30)
 
-_Filled in after the deployment step._
+| Piece | State | Evidence |
+|---|---|---|
+| Vercel project `consultorios/eight-person-live-translator` (GitHub-connected, production branch `main`) | **Deployed, not yet functional** | https://eight-person-live-translator.vercel.app serves commit `fab9d19` (Vercel promoted the project's first deployment, built from this PR's branch, to production); functions in `fra1` |
+| Live checks against that URL | PASS for what exists | landing page 200 on a phone-sized viewport; security headers present (HSTS, X-Frame-Options DENY, no-referrer, mic-only Permissions-Policy); uninvited `POST /api/gatherings/<id>/token` → **401** |
+| `/api/health` | 503 by design | `database:false, livekit:false, internalApi:false, hostCode:false` — no secrets configured yet; creating a gathering is refused until `HOST_ACCESS_CODE` exists |
+| Postgres | **Not provisioned** | needs your approval of a Neon (or other) database in the Vercel project |
+| LiveKit Cloud worker | **Not deployed** | the LiveKit CLI is not linked to your account (`lk cloud auth` needs your browser approval) |
+| Gemini / OpenAI keys | **Not configured** | must be created by you; they are never handled by the assistant |
+
+Once `scripts/configure-cloud.ps1` has run, re-check `/api/health` (all `true`),
+then run rows 1–6 of `docs/DEVICE_TEST_PLAN.md` on two phones and
+`translator/scripts/latency_probe.py` with real Spanish/Polish/English clips to
+fill in real-provider p50/p95.
