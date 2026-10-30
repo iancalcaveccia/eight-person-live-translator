@@ -7,11 +7,10 @@
   Before running:
     1. `lk cloud auth`                     (links the LiveKit CLI to your LiveKit Cloud project)
     2. Fill translator/.env.local with:
-         LIVEKIT_URL=wss://<project>.livekit.cloud
-         LIVEKIT_API_KEY=...
-         LIVEKIT_API_SECRET=...
          GEMINI_API_KEY=...
          OPENAI_API_KEY=...                (optional backup provider)
+       LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET are optional there: when
+       empty, the project linked by `lk cloud auth` is used (or -LiveKitProject <name>).
     3. The Vercel project is linked (repo has .vercel/project.json) and has DATABASE_URL
        (Vercel dashboard -> Storage -> Create Database -> Neon, Frankfurt region).
 
@@ -29,6 +28,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$AppUrl,
   [string]$HostCode = "",
+  [string]$LiveKitProject = "",
   [switch]$SkipWebDeploy
 )
 $ErrorActionPreference = "Stop"
@@ -56,8 +56,32 @@ function New-Secret([int]$bytes = 32) {
 }
 
 $worker = Read-EnvFile "translator/.env.local"
-foreach ($k in "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "GEMINI_API_KEY") {
-  if (-not $worker[$k]) { throw "translator/.env.local is missing $k" }
+
+# LiveKit credentials: translator/.env.local if filled in, otherwise the project
+# linked with `lk cloud auth` (stored by the LiveKit CLI on this PC). Values are
+# never printed.
+if (-not ($worker["LIVEKIT_URL"] -and $worker["LIVEKIT_API_KEY"] -and $worker["LIVEKIT_API_SECRET"])) {
+  $projects = (& $lk project list --json | Out-String | ConvertFrom-Json) | ForEach-Object { $_ }
+  $cliConfig = Join-Path $env:USERPROFILE ".livekit\cli-config.yaml"
+  $default = ""
+  if (Test-Path $cliConfig) {
+    $m = Select-String -Path $cliConfig -Pattern '^\s*default_project:\s*(\S+)' | Select-Object -First 1
+    if ($m) { $default = $m.Matches[0].Groups[1].Value.Trim('"') }
+  }
+  $chosen = if ($LiveKitProject) { $projects | Where-Object { $_.Name -eq $LiveKitProject } }
+            elseif ($default) { $projects | Where-Object { $_.Name -eq $default } }
+            else { $projects | Select-Object -First 1 }
+  $chosen = $chosen | Select-Object -First 1
+  if (-not $chosen -or -not $chosen.APIKey -or -not $chosen.APISecret) {
+    throw "No LiveKit credentials: fill translator/.env.local or run 'lk cloud auth' first"
+  }
+  Write-Host "Using LiveKit project '$($chosen.Name)' linked with 'lk cloud auth'."
+  $worker["LIVEKIT_URL"] = $chosen.URL
+  $worker["LIVEKIT_API_KEY"] = $chosen.APIKey
+  $worker["LIVEKIT_API_SECRET"] = $chosen.APISecret
+}
+if (-not $worker["GEMINI_API_KEY"]) {
+  throw "translator/.env.local is missing GEMINI_API_KEY (paste it after GEMINI_API_KEY= and save the file)"
 }
 
 # Reuse previously generated secrets so re-running does not break the running agent.
