@@ -30,8 +30,10 @@ No secret uses a `NEXT_PUBLIC_` prefix; the build was checked for leaked names
    the browser.
 2. **Gemini**: create an API key at https://aistudio.google.com/apikey on a
    project with billing enabled; set a budget alert in Google Cloud.
-3. Put the LiveKit URL/key/secret and the Gemini key in `translator/.env.local`
-   (gitignored).
+3. Nothing to paste into files: the script below takes the LiveKit URL/key/secret
+   from the project linked by `lk cloud auth`, and asks for the Gemini key
+   (masked) on first run, saving it to `translator/.env.local` (gitignored). It
+   checks the key against Google before deploying anything.
 4. **Database**: Vercel dashboard → the project → Storage → Create Database →
    Neon → region Frankfurt (eu-central-1) → connect to Production and Preview.
 5. Run:

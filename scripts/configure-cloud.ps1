@@ -6,11 +6,11 @@
 
   Before running:
     1. `lk cloud auth`                     (links the LiveKit CLI to your LiveKit Cloud project)
-    2. Fill translator/.env.local with:
-         GEMINI_API_KEY=...
-         OPENAI_API_KEY=...                (optional backup provider)
-       LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET are optional there: when
-       empty, the project linked by `lk cloud auth` is used (or -LiveKitProject <name>).
+    2. Have a Gemini API key ready. If translator/.env.local has no GEMINI_API_KEY,
+       the script asks for it (masked input) and saves it there. Optional in that
+       file: OPENAI_API_KEY (backup provider) and LIVEKIT_URL / LIVEKIT_API_KEY /
+       LIVEKIT_API_SECRET; when those are empty, the project linked by
+       `lk cloud auth` is used (or -LiveKitProject <name>).
     3. The Vercel project is linked (repo has .vercel/project.json) and has DATABASE_URL
        (Vercel dashboard -> Storage -> Create Database -> Neon, Frankfurt region).
 
@@ -81,7 +81,41 @@ if (-not ($worker["LIVEKIT_URL"] -and $worker["LIVEKIT_API_KEY"] -and $worker["L
   $worker["LIVEKIT_API_SECRET"] = $chosen.APISecret
 }
 if (-not $worker["GEMINI_API_KEY"]) {
-  throw "translator/.env.local is missing GEMINI_API_KEY (paste it after GEMINI_API_KEY= and save the file)"
+  # Ask for the key in this terminal (input is masked) and save it to translator/.env.local.
+  Write-Host ""
+  Write-Host "Paste your Gemini API key (from https://aistudio.google.com/apikey) and press Enter."
+  Write-Host "It shows as *** and is saved only to translator/.env.local on this PC."
+  $secure = Read-Host -AsSecureString "Gemini API key"
+  $plain = ([System.Net.NetworkCredential]::new("", $secure).Password).Trim().Trim('"')
+  if (-not $plain) { throw "No Gemini key entered" }
+  $envPath = Join-Path $repo "translator\.env.local"
+  $out = New-Object System.Collections.Generic.List[string]
+  $replaced = $false
+  if (Test-Path $envPath) {
+    foreach ($line in Get-Content $envPath) {
+      if (-not $replaced -and $line -match '^\s*GEMINI_API_KEY\s*=') { $out.Add("GEMINI_API_KEY=$plain"); $replaced = $true }
+      else { $out.Add($line) }
+    }
+  }
+  if (-not $replaced) { $out.Add("GEMINI_API_KEY=$plain") }
+  [System.IO.File]::WriteAllLines($envPath, $out, (New-Object System.Text.UTF8Encoding $false))
+  $worker["GEMINI_API_KEY"] = $plain
+  Write-Host "Saved to translator/.env.local."
+}
+
+# Check the Gemini key and model before deploying anything (prints only the outcome).
+$geminiModel = if ($worker["GEMINI_MODEL"]) { $worker["GEMINI_MODEL"] } else { "gemini-3.5-live-translate-preview" }
+try {
+  Invoke-RestMethod -Uri "https://generativelanguage.googleapis.com/v1beta/models/$geminiModel" `
+    -Headers @{ "x-goog-api-key" = $worker["GEMINI_API_KEY"] } -TimeoutSec 20 | Out-Null
+  Write-Host "Gemini key check: OK ($geminiModel is available to this key)."
+} catch {
+  $code = 0
+  if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+  if ($code -in 400, 401, 403) {
+    throw "Google rejected the Gemini key (HTTP $code). Create a new key at https://aistudio.google.com/apikey and run this script again; it will ask for the key if you first empty the GEMINI_API_KEY= line in translator/.env.local."
+  }
+  Write-Warning "Could not confirm the Gemini model (HTTP ${code}: $($_.Exception.Message)). Continuing."
 }
 
 # Reuse previously generated secrets so re-running does not break the running agent.

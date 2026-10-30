@@ -86,7 +86,7 @@ pwsh scripts/e2e-local.ps1                  # browsers + LiveKit + worker (mock)
 - **Database** → managed Postgres (Neon via Vercel Marketplace recommended).
 
 Run `powershell -ExecutionPolicy Bypass -File scripts\configure-cloud.ps1 -AppUrl https://<app>.vercel.app` after
-`lk cloud auth` and filling `translator/.env.local`. It sets every secret on
+`lk cloud auth`. It asks for the Gemini key (masked) if `translator/.env.local` lacks it, sets every secret on
 Vercel and LiveKit without exposing values, deploys both halves and checks
 `/api/health`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
