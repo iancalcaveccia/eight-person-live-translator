@@ -95,6 +95,22 @@ function RoomContent({
     session?.setListenerSettings(settings, listenLang);
   }, [session, settings, listenLang]);
 
+  // Test-only inspection hooks, compiled in only for E2E builds.
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_E2E_HOOKS !== "1" || !session) return;
+    (window as unknown as { __mesa?: unknown }).__mesa = {
+      snapshot: () => session.getSnapshot(),
+      mixer: () => session.mixer.debugDecisions(),
+      captions: () => session.captions.list().map((c) => ({ ...c })),
+      latency: () => ({ client: session.latency.summary(), server: session.latency.serverSummary(), samples: session.latency.samples }),
+      room: () => session.currentRoom?.name ?? null,
+      subscribed: () =>
+        [...(session.currentRoom?.remoteParticipants.values() ?? [])].flatMap((p) =>
+          [...p.audioTrackPublications.values()].filter((t) => t.isSubscribed).map((t) => ({ from: p.identity, kind: p.kind, track: t.trackName })),
+        ),
+    };
+  }, [session]);
+
   // Someone else (group owner / another tab) moved us: the server epoch is newer than our token.
   useEffect(() => {
     if (!session || !snap || !state) return;

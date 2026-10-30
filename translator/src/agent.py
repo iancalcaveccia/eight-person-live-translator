@@ -27,7 +27,11 @@ load_dotenv(".env.local")
 
 SETTINGS = load_settings()
 
-server = AgentServer()
+# Pre-warmed job processes (one per group room). The framework default in
+# production mode is one per CPU; AGENT_IDLE_PROCESSES overrides it (e.g. small
+# machines, local E2E runs).
+_idle_processes = os.environ.get("AGENT_IDLE_PROCESSES", "").strip()
+server = AgentServer(num_idle_processes=int(_idle_processes)) if _idle_processes.isdigit() else AgentServer()
 
 
 def parse_dispatch_metadata(raw: str | None, room_name: str) -> tuple[str, str]:

@@ -12,8 +12,9 @@ export async function GET() {
     const db = await getDb();
     await db.query("select 1");
     database = true;
-  } catch {
+  } catch (err) {
     database = false;
+    console.error("[health] database unavailable:", err instanceof Error ? `${err.name}: ${err.message}` : "unknown");
   }
   const body = {
     ok: database,

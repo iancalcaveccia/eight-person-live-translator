@@ -61,6 +61,11 @@ async function createPostgresDb(url: string): Promise<Db> {
 
 async function createPgliteDb(dataDir?: string): Promise<Db> {
   const { PGlite } = await import("@electric-sql/pglite");
+  if (dataDir) {
+    // PGlite creates only the last path segment; make sure parents exist.
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(dataDir, { recursive: true });
+  }
   const pg = dataDir ? new PGlite(dataDir) : new PGlite();
   await pg.waitReady;
 

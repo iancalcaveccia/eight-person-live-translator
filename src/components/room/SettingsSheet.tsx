@@ -235,6 +235,33 @@ export default function SettingsSheet({
           Measured from when the interpreter detects speech to when translated sound starts on this phone; the
           speaker&apos;s own upload delay (usually 0.1–0.3 s) is not included. No audio is recorded to measure this.
         </p>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={async () => {
+            const report = {
+              at: new Date().toISOString(),
+              userAgent: navigator.userAgent,
+              input: snap.inputDeviceLabel,
+              inputLooksLikeHeadset: snap.inputIsHeadset,
+              network: snap.quality,
+              group: snap.groupId,
+              peopleInGroup: snap.humans.length + 1,
+              speechToEarsMs: lat,
+              interruptionsMs: latOverlap,
+              interpreterProcessingMs: server,
+              lastSwitchMs: snap.lastSwitchMs,
+              sessions: Object.values(snap.translation).map((t) => ({ target: t.target, provider: t.provider, state: t.state })),
+              samplesMs: session.latency.samples.map((s) => s.ms),
+            };
+            try {
+              await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+            } catch {
+              /* clipboard blocked */
+            }
+          }}
+        >
+          Copy measurements (no audio or text)
+        </button>
         {Object.values(snap.translation).length > 0 && (
           <div className="stack">
             {Object.values(snap.translation).map((t) => (
