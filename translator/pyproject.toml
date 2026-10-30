@@ -5,13 +5,17 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "gemini-live-translator"
 version = "0.1.0"
-description = "LiveKit Agents worker that translates room audio via Gemini Live"
+description = "LiveKit Agents worker: streaming speech-to-speech interpretation (Gemini Live Translate primary, OpenAI gpt-realtime-translate optional)"
 requires-python = ">=3.10, <3.15"
 
+# Providers are spoken to over raw WebSockets (see src/providers/), so no
+# vendor SDK is required. numpy/aiohttp/websockets are imported directly.
 dependencies = [
     "livekit-agents~=1.5",
-    "google-genai>=0.8.0",
     "python-dotenv",
+    "numpy>=1.26",
+    "aiohttp>=3.10",
+    "websockets>=13",
 ]
 
 [dependency-groups]
@@ -35,6 +39,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# The local livekit-server --dev secret ("secret") is short by design.
+filterwarnings = ["ignore:The HMAC key is"]
 
 [tool.ruff]
 line-length = 88
