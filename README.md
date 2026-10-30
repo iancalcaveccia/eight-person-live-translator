@@ -85,7 +85,7 @@ pwsh scripts/e2e-local.ps1                  # browsers + LiveKit + worker (mock)
 - **Worker** → LiveKit Cloud Agents, region `eu-central` (Frankfurt).
 - **Database** → managed Postgres (Neon via Vercel Marketplace recommended).
 
-Run `pwsh scripts/configure-cloud.ps1 -AppUrl https://<app>.vercel.app` after
+Run `powershell -ExecutionPolicy Bypass -File scripts\configure-cloud.ps1 -AppUrl https://<app>.vercel.app` after
 `lk cloud auth` and filling `translator/.env.local`. It sets every secret on
 Vercel and LiveKit without exposing values, deploys both halves and checks
 `/api/health`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).

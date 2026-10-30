@@ -23,7 +23,8 @@
       with GEMINI_API_KEY, OPENAI_API_KEY, CONTROL_PLANE_URL and INTERNAL_API_SECRET.
     - Deploys the web app to production and checks /api/health.
 
-  Usage:  pwsh scripts/configure-cloud.ps1 -AppUrl https://<your-app>.vercel.app [-HostCode <code>]
+  Usage (Windows PowerShell 5.1 or 7):
+    powershell -ExecutionPolicy Bypass -File scripts\configure-cloud.ps1 -AppUrl https://<your-app>.vercel.app [-HostCode <code>]
 #>
 param(
   [Parameter(Mandatory = $true)][string]$AppUrl,
@@ -72,15 +73,16 @@ if (-not $HostCode) { $HostCode = if ($saved["HOST_ACCESS_CODE"]) { $saved["HOST
   "APP_SECRET=$appSecret",
   "CRON_SECRET=$cron",
   "HOST_ACCESS_CODE=$HostCode"
-) | Set-Content -Encoding utf8 (Join-Path $state "generated.env")
-Set-Content -Encoding utf8 (Join-Path $state "host-access-code.txt") $HostCode
+) | Set-Content -Encoding ascii (Join-Path $state "generated.env")
+Set-Content -Encoding ascii (Join-Path $state "host-access-code.txt") $HostCode
 
 # ---------------------------------------------------------------- Vercel env
 function Set-VercelEnv($name, $value, [switch]$Plain) {
   foreach ($target in "production", "preview") {
-    $flags = @("env", "add", $name, $target, "--force", "--yes")
+    # --value (not a stdin pipe): Windows PowerShell 5.1 would append a newline to piped values.
+    $flags = @("env", "add", $name, $target, "--value", $value, "--force", "--yes")
     if (-not $Plain) { $flags += "--sensitive" }
-    $value | vercel @flags | Out-Null
+    vercel @flags | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "vercel env add $name $target failed" }
   }
   Write-Host "  set $name"

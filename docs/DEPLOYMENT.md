@@ -37,7 +37,7 @@ No secret uses a `NEXT_PUBLIC_` prefix; the build was checked for leaked names
 5. Run:
 
    ```bash
-   pwsh scripts/configure-cloud.ps1 -AppUrl https://<project>.vercel.app
+   powershell -ExecutionPolicy Bypass -File scripts\configure-cloud.ps1 -AppUrl https://<project>.vercel.app
    ```
 
    It sets all Vercel variables (sensitive), creates the LiveKit agent in
