@@ -1,141 +1,104 @@
-# Live Translate
+# Mesa — live interpreter for an eight-person table
 
-Multi-language video calls. Everyone picks their language. Translation spins up on demand.
+Up to eight people, each with their own phone and Bluetooth headset, talk
+naturally in **English, Polish or Spanish** (Argentine / Colombian / Castilian
+preference) and hear everyone else **interpreted live into their own language,
+while the speaker is still talking**. People can interrupt each other, and the
+table can split into **private conversations** (living room / outside) and come
+back together.
 
-Powered by [LiveKit Agents](https://docs.livekit.io/agents/) (Python worker) and the [Gemini Live API](https://ai.google.dev/gemini-api/docs/live).
+Built on the MIT-licensed [livekit-examples/gemini-live-translate](https://github.com/livekit-examples/gemini-live-translate)
+(Next.js + LiveKit + a Python LiveKit Agents worker), extended with secure
+gatherings, breakout groups, a listener-side interruption mixer, cost controls,
+a mobile UI and a provider abstraction (Gemini primary, OpenAI backup).
 
-![architecture](https://img.shields.io/badge/architecture-peer--call-1A1917) ![agent](https://img.shields.io/badge/agent-python-3776AB) ![web](https://img.shields.io/badge/web-nextjs-000000)
+> **Status (2026-10-30):** all automated tests pass locally, including real
+> Chrome + LiveKit + worker end-to-end runs with a mock translator (see
+> [docs/TEST_REPORT.md](docs/TEST_REPORT.md)). The web app is deployed at
+> https://eight-person-live-translator.vercel.app but is **not functional
+> until the database, LiveKit and Gemini credentials are configured**
+> ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Real-provider latency and every
+> real-phone / Bluetooth test are **not yet run**.
 
----
+## How it works (short)
 
-## What it does
+- **Gathering** = invite-only container (link/QR, host access code to create).
+- **Conversation group** = its own LiveKit room. You are in exactly one at a
+  time; the server picks the room for your token, evicts you from the old room
+  when you switch, and the worker re-checks every participant against Postgres.
+- **Translation** = one streaming session per *(speaker, target language)* per
+  group, shared by all listeners of that language, published as track
+  `tx:<speaker>:<lang>`. Same-language listeners hear the original voice.
+- **Listening** = each phone mixes the incoming tracks in Web Audio: short
+  interjections duck the longer speaker by ~7 dB instead of muting; Focus and
+  Equal modes; per-speaker volume, mute, "hear original".
 
-Anyone with the link joins as a peer. Each participant picks one language — that's what they speak **and** what they want to hear everyone else in. When someone speaks, a Gemini Live session translates their audio into every other distinct language present in the room, on demand. Same-language pairs hear each other natively, no Gemini cost.
+Details: [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md),
+interface contract: [docs/architecture/CONTRACT.md](docs/architecture/CONTRACT.md),
+worker design: [docs/architecture/WORKER.md](docs/architecture/WORKER.md).
 
-- 8-person rooms by default (configurable)
-- 16 supported languages plus "None — native passthrough"
-- Camera + mic default off; toggle on when you're ready
-- Captions sidebar (per listener, in their chosen language) with auto-scroll transcripts
-- LiveKit Cloud Agents-ready: deploy the Python worker, the frontend dispatches it via room config on token mint
+## Repository layout
 
-## How it works
-
-```mermaid
-flowchart LR
-    Alice(["Alice<br/>EN"])
-    Bob(["Bob<br/>ES"])
-    Agent["<b>Translator agent</b><br/>Python worker<br/>one per LiveKit room"]
-
-    Alice -- mic --> Agent
-    Bob -- mic --> Agent
-    Agent -- "tx:bob:en" --> Alice
-    Agent -- "tx:alice:es" --> Bob
+```
+src/app/            Next.js App Router pages + API route handlers
+src/server/         control plane: Postgres, auth, groups, tokens, caps (server-only)
+src/client/         browser media: MediaSession, mixer, routing, captions, latency
+src/components/     UI (room screen, sheets, onboarding)
+translator/         Python LiveKit Agents worker (Gemini / OpenAI / mock providers)
+tests/unit/         vitest: authorization, privacy partitions, mixer, routing
+tests/e2e/          Playwright: real Chrome + local LiveKit + worker (mock provider)
+docs/               specs (docs/codex), architecture, providers, mobile, costs, test report
+scripts/            e2e-local.ps1, configure-cloud.ps1, setup.sh
 ```
 
-Each participant's chosen language lives in their LiveKit `attributes.lang`. The agent watches `participantAttributesChanged` and reconciles a map of `(speaker, target_lang)` sessions — one Gemini Live session per pair, skipping pairs where source == target.
+## Run locally
 
-For each active pair the agent publishes two things into the room:
-
-- an audio track named **`tx:<speaker>:<target_lang>`** carrying the translated speech
-- a **`lk.translation`** text-stream carrying the matching captions, tagged with `target_lang`
-
-The frontend subscribes to either the native mic or the matching `tx:*` track for each peer, based on the same `(listener_lang, speaker_lang)` predicate.
-
-## Quick start
-
-You need:
-- Node.js 20+, [pnpm](https://pnpm.io/) (or run `corepack enable` and let the repo's `packageManager` field pin it)
-- Python 3.11+, [uv](https://docs.astral.sh/uv/)
-- A [LiveKit Cloud](https://cloud.livekit.io) project (free tier works)
-- A [Gemini API key](https://aistudio.google.com/apikey)
+Requirements: Node 20+, pnpm 10, Python 3.11–3.13 with [uv](https://docs.astral.sh/uv/).
 
 ```bash
-# 1. Install deps and seed env files
-pnpm run setup
-
-# 2. Fill in credentials in .env.local and translator/.env.local
-#    LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET (both files)
-#    GEMINI_API_KEY (translator/.env.local only)
-
-# 3. Run frontend + agent worker together
-pnpm run dev
+pnpm run setup            # installs both halves, creates .env.local files
 ```
 
-Open <http://localhost:3000>, click **Create session**, share the URL with another browser, pick different languages, unmute.
+**Without any cloud account** (mock translator, local LiveKit server):
 
-## Repo layout
+1. Download `livekit-server` from the official [releases](https://github.com/livekit/livekit/releases) and run `livekit-server --dev`.
+2. `.env.local`: `LIVEKIT_URL=ws://127.0.0.1:7880`, `LIVEKIT_API_KEY=devkey`, `LIVEKIT_API_SECRET=secret`, `INTERNAL_API_SECRET=dev-secret`, `HOST_ACCESS_CODE=dev`.
+3. `translator/.env.local`: same LiveKit values, `TRANSLATION_PROVIDER=mock`, `CONTROL_PLANE_URL=http://localhost:3000`, `INTERNAL_API_SECRET=dev-secret`.
+4. `pnpm run dev` and open http://localhost:3000 (the embedded dev database lives in `./.data`).
 
-```
-gemini-live-translate-livekit/
-├── src/                                # Next.js 16 frontend
-│   ├── app/
-│   │   ├── page.tsx                    # Landing
-│   │   ├── api/token/route.ts          # Mints token + dispatches translator agent
-│   │   └── session/[id]/
-│   │       ├── page.tsx                # Pre-flight (name + language)
-│   │       └── room/                   # In-call UI
-│   │           ├── RoomClient.tsx
-│   │           ├── InCall.tsx
-│   │           ├── VideoGrid.tsx       + ParticipantTile, SelfView
-│   │           ├── ControlBar.tsx      + LanguagePill
-│   │           ├── CaptionsSidebar.tsx
-│   │           └── useTranslationRouting.ts
-│   └── lib/
-│       ├── languages.ts                # 16 languages + "none" sentinel
-│       └── config.ts                   # Caps, attribute keys
-└── translator/                         # Python LiveKit Agents worker
-    ├── src/
-    │   ├── agent.py                    # @server.rtc_session(agent_name="gemini-translator")
-    │   ├── router.py                   # TranslationRouter (reconcile loop)
-    │   ├── session.py                  # GeminiSession (one per speaker→target pair)
-    │   ├── audio.py                    # PCM glue
-    │   └── config.py                   # Model id, debounce, grace, etc.
-    ├── tests/test_router.py            # Demand-set computation
-    ├── pyproject.toml
-    ├── Dockerfile                      # For LiveKit Cloud Agents deploy
-    └── livekit.toml
+**With real translation:** use your LiveKit Cloud project values and set
+`GEMINI_API_KEY` (and optionally `OPENAI_API_KEY`) in `translator/.env.local`,
+with `TRANSLATION_PROVIDER=gemini`.
+
+## Tests
+
+```bash
+pnpm test                                   # vitest unit/integration (control plane, mixer, routing)
+pnpm lint && pnpm typecheck && pnpm build
+cd translator && uv run pytest && uv run ruff check && uv run ruff format --check
+pwsh scripts/e2e-local.ps1                  # browsers + LiveKit + worker (mock), Windows script
 ```
 
 ## Deploy
 
-**Agent** — to LiveKit Cloud Agents:
-```bash
-cd translator
-lk agent create --secrets-file .env.local .   # first time
-lk agent deploy                               # subsequent deploys
-```
+- **Web** → Vercel (project linked to this repo, region `fra1`, daily cleanup cron).
+- **Worker** → LiveKit Cloud Agents, region `eu-central` (Frankfurt).
+- **Database** → managed Postgres (Neon via Vercel Marketplace recommended).
 
-**Frontend** — anywhere that runs Next.js. The repo includes a `Dockerfile` for container deploys (Cloud Run, Fly.io, Render, etc.). For Vercel, no special config needed since the only API route is `/api/token` and it's stateless.
+Run `powershell -ExecutionPolicy Bypass -File scripts\configure-cloud.ps1 -AppUrl https://<app>.vercel.app` after
+`lk cloud auth`. It asks for the Gemini key (masked) if `translator/.env.local` lacks it, sets every secret on
+Vercel and LiveKit without exposing values, deploys both halves and checks
+`/api/health`. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-Set on the frontend host:
-- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+## Important limits (honest)
 
-Set on the agent host:
-- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `GEMINI_API_KEY`
-
-## Configuration
-
-Caps in `src/lib/config.ts` and `translator/src/config.py` — adjust together:
-
-| Setting | Default | Where |
-|---|---|---|
-| Max participants per room | 8 | `MAX_PARTICIPANTS` (token route) |
-| Session TTL | 4h | token route `ttl` |
-| Empty-room timeout | 60s | token route |
-| Session grace on mute | 10s | `SESSION_GRACE_SEC` (agent) |
-| Reconcile debounce | 250ms | `RECONCILE_DEBOUNCE_SEC` (agent) |
-| Gemini model | `gemini-3.5-live-translate-preview` | `GEMINI_MODEL` (agent) |
-
-## Tech stack
-
-- **Frontend** — Next.js 16 (Turbopack), React 19, `@livekit/components-react`, `livekit-client`
-- **Token mint** — `livekit-server-sdk` (`RoomAgentDispatch` + `RoomConfiguration`)
-- **Agent runtime** — `livekit-agents` 1.5 with `AgentServer.rtc_session()`
-- **Translation** — Gemini Live API (raw v1beta `BidiGenerateContent` WebSocket with `translationConfig`)
-- **Audio I/O** — `livekit.rtc.AudioStream` (16 kHz mono in) + `AudioSource` (24 kHz mono out)
-- **Typography** — Instrument Serif (display), DM Sans (body), DM Mono (status)
-- **Package management** — `pnpm` + `uv`
+- Polish can only be produced by Gemini; OpenAI's translation model has no Polish output. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
+- Spanish regional preference is shown and recorded but no live model can produce a specific regional accent yet.
+- Voices: the models adapt to each speaker's voice on their own; there is no voice picker and no cloning.
+- iPhone pauses the microphone when the screen locks; the app keeps the screen awake. See [docs/MOBILE.md](docs/MOBILE.md).
+- Server-side group privacy cannot stop a microphone from physically hearing someone nearby.
+- Costs: see [docs/COSTS.md](docs/COSTS.md) (≈ $5–6 per hour for an active 8-person, 3-language table on Gemini; hard caps enforced).
 
 ## License
 
-MIT
+MIT, including the upstream LiveKit example (see [LICENSE](LICENSE)).

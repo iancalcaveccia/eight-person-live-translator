@@ -1,162 +1,320 @@
-"""Unit tests for the TranslationRouter's pure demand-computation logic.
-
-These do not exercise LiveKit connectivity or Gemini sessions; they verify that
-the router computes the correct (speaker, target_lang) set given fake room
-state.
-"""
+"""TranslationRouter: demand -> sessions, admission/eviction, budget, idle."""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from unittest.mock import MagicMock
+import asyncio
 
-import pytest
-
-# Make `src/` importable
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from config import NATIVE_LANG, PARTICIPANT_LANG_ATTR  # noqa: E402
-from router import TranslationRouter  # noqa: E402
-
-
-def _fake_participant(identity: str, lang: str | None, *, mic_muted: bool = False):
-    p = MagicMock()
-    p.identity = identity
-    p.attributes = {PARTICIPANT_LANG_ATTR: lang} if lang else {}
-    # one fake audio publication
-    pub = MagicMock()
-    pub.kind = _AUDIO_KIND
-    pub.muted = mic_muted
-    pub.track = MagicMock(name="track")
-    p.track_publications = {"pub-sid": pub}
-    return p
-
-
-def _fake_room(participants):
-    room = MagicMock()
-    room.remote_participants = {p.identity: p for p in participants}
-    return room
-
-
-# Import the actual TrackKind enum value the router compares against.
-from livekit import rtc  # noqa: E402
-
-_AUDIO_KIND = rtc.TrackKind.KIND_AUDIO
-
-
-def _router_with(participants):
-    room = _fake_room(participants)
-    router = TranslationRouter(room=room, gemini_api_key="test-key")
-    # Skip room.on() wiring; emulate the "tracks already subscribed" backfill.
-    for p in participants:
-        for pub in p.track_publications.values():
-            if pub.kind == _AUDIO_KIND and pub.track:
-                router._speaker_tracks[p.identity] = pub.track
-    return router
-
-
-def test_no_listeners_means_no_sessions():
-    p1 = _fake_participant("alice", "en")
-    p2 = _fake_participant("bob", "es")
-    # Both have lang set, but for the "listener" view, "lang" is used as both
-    # speak and listen. So actually they ARE listeners. Adjust: empty room.
-    router = _router_with([])
-    assert router._compute_desired_sessions() == set()
-
-
-def test_native_only_listener_no_sessions():
-    """A listener with lang='none' implies they want native passthrough."""
-    p1 = _fake_participant("alice", NATIVE_LANG)
-    router = _router_with([p1])
-    assert router._compute_desired_sessions() == set()
-
-
-def test_same_language_pair_no_sessions():
-    """Two German speakers, no other languages → no translation needed."""
-    p1 = _fake_participant("p1", "de")
-    p2 = _fake_participant("p2", "de")
-    router = _router_with([p1, p2])
-    assert router._compute_desired_sessions() == set()
-
-
-def test_two_different_languages_creates_pair():
-    """English speaker + Spanish speaker → 2 sessions (one each direction)."""
-    p1 = _fake_participant("p1", "en")
-    p2 = _fake_participant("p2", "es")
-    router = _router_with([p1, p2])
-    assert router._compute_desired_sessions() == {
-        ("p1", "es"),
-        ("p2", "en"),
-    }
-
-
-def test_grill_example_four_participants():
-    """P1=en, P2=es, P3=de, P4=de. P3↔P4 stays native (same lang)."""
-    p1 = _fake_participant("p1", "en")
-    p2 = _fake_participant("p2", "es")
-    p3 = _fake_participant("p3", "de")
-    p4 = _fake_participant("p4", "de")
-    router = _router_with([p1, p2, p3, p4])
-    expected = {
-        ("p1", "es"),
-        ("p1", "de"),
-        ("p2", "en"),
-        ("p2", "de"),
-        ("p3", "en"),
-        ("p3", "es"),
-        ("p4", "en"),
-        ("p4", "es"),
-    }
-    assert router._compute_desired_sessions() == expected
-
-
-def test_muted_speaker_does_not_produce_outgoing_sessions():
-    """A speaker with muted mic isn't translated FROM, but their language still
-    counts as listener demand."""
-    p1 = _fake_participant("p1", "en", mic_muted=True)
-    p2 = _fake_participant("p2", "es")
-    router = _router_with([p1, p2])
-    # p1 muted -> no ("p1", *) session. p2 unmuted -> ("p2", "en") to serve p1.
-    assert router._compute_desired_sessions() == {("p2", "en")}
-
-
-def test_all_speakers_muted_no_sessions():
-    """Demand exists but nobody is speaking -> nothing to translate."""
-    p1 = _fake_participant("p1", "en", mic_muted=True)
-    p2 = _fake_participant("p2", "es", mic_muted=True)
-    router = _router_with([p1, p2])
-    assert router._compute_desired_sessions() == set()
-
-
-def test_listener_with_native_does_not_block_others():
-    """A listener with lang='none' shouldn't add to target_langs, but their
-    presence shouldn't suppress sessions either."""
-    p1 = _fake_participant("p1", "en")
-    p2 = _fake_participant("p2", "es")
-    p3 = _fake_participant("p3", NATIVE_LANG)
-    router = _router_with([p1, p2, p3])
-    # p3 wants native; the en<->es pair still needs translation.
-    assert router._compute_desired_sessions() == {
-        ("p1", "es"),
-        ("p2", "en"),
-    }
-
-
-@pytest.mark.parametrize(
-    "speaker_lang,listener_lang,expected_session",
-    [
-        ("en", "es", True),
-        ("de", "de", False),
-        ("fr", NATIVE_LANG, False),
-    ],
+import numpy as np
+from helpers import (
+    FakeControlPlane,
+    FakeRoom,
+    fast,
+    frames_of,
+    human,
+    paced_then_silence,
+    silence,
+    speech_like,
+    wait_for,
 )
-def test_single_pair(speaker_lang, listener_lang, expected_session):
-    speaker = _fake_participant("speaker", speaker_lang)
-    listener = _fake_participant("listener", listener_lang, mic_muted=True)
-    router = _router_with([speaker, listener])
-    sessions = router._compute_desired_sessions()
-    if expected_session:
-        assert ("speaker", listener_lang) in sessions
-    else:
-        assert sessions == set()
+
+from audio import simple_resampler_factory
+from control_plane import ControlPlaneClient, TranslationPolicy
+from events import FakeRoomIO
+from providers.mock import MockProvider
+from router import TranslationRouter
+
+SPEECH = np.concatenate([silence(0.2), speech_like(6.0, seed=11)])
+
+
+def frames_factory(track):
+    return paced_then_silence(frames_of(SPEECH))
+
+
+class Harness:
+    def __init__(
+        self, participants, *, control_plane=None, providers=None, settings=None
+    ):
+        self.room = FakeRoom(participants=participants)
+        self.io = FakeRoomIO()
+        self.cp = control_plane or ControlPlaneClient(base_url="", secret="")
+        self.evicted: list[tuple[str, str]] = []
+        self.shutdowns: list[str] = []
+        self.providers = providers or {"mock": MockProvider(delay_ms=200)}
+        self.router = TranslationRouter(
+            room=self.room,
+            room_io=self.io,
+            providers=self.providers,
+            settings=settings or fast(translation_provider="mock"),
+            control_plane=self.cp,
+            gathering_id="g1",
+            group_id="grp1",
+            evict=self._evict,
+            shutdown=self.shutdowns.append,
+            frames_factory=frames_factory,
+            resampler_factory=simple_resampler_factory,
+        )
+
+    async def _evict(self, identity: str, reason: str) -> None:
+        self.evicted.append((identity, reason))
+        if identity in self.room.remote_participants:
+            self.room.remove(identity)
+
+    def pairs(self) -> set[tuple[str, str]]:
+        return {(k.speaker, k.target) for k in self.router.sessions}
+
+    async def close(self) -> None:
+        await self.router.aclose()
+
+
+async def test_eight_people_three_languages_sixteen_shared_sessions():
+    people = [human(f"en{i}", "en", "en") for i in range(3)]
+    people += [human(f"pl{i}", "pl", "pl") for i in range(3)]
+    people += [human(f"es{i}", "es", "es") for i in range(2)]
+    h = Harness(people)
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 16, timeout=5)
+    names = h.io.track_names()
+    assert len(names) == 16
+    assert "tx:en0:pl" in names and "tx:es1:en" in names and "tx:pl2:es" in names
+    assert all(
+        k.gathering_id == "g1" and k.group_id == "grp1" for k in h.router.sessions
+    )
+    # Exactly one SpeakerInput per human mic, shared by that speaker's sessions.
+    assert len(h.router.inputs) == 8
+    await h.close()
+
+
+async def test_one_english_speaker_three_spanish_listeners_single_session():
+    people = [human("en", "en", "en")] + [
+        human(f"es{i}", "es", "es", muted=True) for i in range(3)
+    ]
+    h = Harness(people)
+    h.router.start()
+    assert await wait_for(lambda: h.pairs() == {("en", "es")}, timeout=5)
+    await asyncio.sleep(0.3)
+    assert h.pairs() == {("en", "es")}
+    await h.close()
+
+
+async def test_source_caption_designation_one_per_speaker():
+    people = [
+        human("a", "es", "es"),
+        human("b", "pl", "pl", muted=True),
+        human("c", "en", "en", muted=True),
+    ]
+    h = Harness(people)
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    flags = {k.target: s.publish_source for k, s in h.router.sessions.items()}
+    assert flags == {"en": True, "pl": False}
+    await h.close()
+
+
+async def test_admission_denial_evicts_and_excludes_from_demand():
+    cp = FakeControlPlane()
+    cp.denied["intruder"] = "not_in_group"
+    people = [
+        human("a", "es", "es"),
+        human("b", "pl", "pl"),
+        human("intruder", "en", "en"),
+    ]
+    h = Harness(people, control_plane=cp)
+    h.router.start()
+    assert await wait_for(lambda: ("intruder", "not_in_group") in h.evicted, timeout=5)
+    assert await wait_for(lambda: h.pairs() == {("a", "pl"), ("b", "es")}, timeout=5)
+    assert not any(
+        k.speaker == "intruder" or k.target == "en" for k in h.router.sessions
+    )
+    await h.close()
+
+
+async def test_old_token_with_stale_epoch_is_evicted():
+    cp = FakeControlPlane()
+    cp.epochs["replayer"] = 5  # server says the active epoch is 5
+    people = [human("a", "es", "es"), human("replayer", "pl", "pl", epoch="3")]
+    h = Harness(people, control_plane=cp)
+    h.router.start()
+    assert await wait_for(lambda: ("replayer", "stale_epoch") in h.evicted, timeout=5)
+    await asyncio.sleep(0.3)
+    assert h.router.sessions == {}
+    await h.close()
+
+
+async def test_nobody_is_translated_before_admission_completes():
+    cp = FakeControlPlane()
+    cp.fail = True
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")], control_plane=cp)
+    h.router.start()
+    await asyncio.sleep(0.25)
+    assert h.router.sessions == {}
+    # Fail closed: never-admitted humans are removed after the deadline.
+    assert await wait_for(lambda: len(h.evicted) == 2, timeout=5)
+    assert all(reason == "admission_unavailable" for _, reason in h.evicted)
+    await h.close()
+
+
+async def test_unknown_room_evicts_everyone_and_shuts_down():
+    cp = FakeControlPlane()
+    cp.room_unknown = True
+    h = Harness([human("a", "es", "es")], control_plane=cp)
+    h.router.start()
+    assert await wait_for(lambda: h.shutdowns == ["unknown_room"], timeout=5)
+    assert ("a", "unknown_room") in h.evicted
+    await h.close()
+
+
+async def test_budget_exceeded_closes_every_session_and_blocks_new_ones():
+    cp = FakeControlPlane()
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")], control_plane=cp)
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    cp.usage_translation = TranslationPolicy(False, "gathering_cap")
+    cp.translation = TranslationPolicy(False, "gathering_cap")
+    assert await wait_for(
+        lambda: h.router.sessions == {} and not h.router.translation_allowed, timeout=5
+    )
+    assert any(
+        e == {"t": "budget", "state": "exceeded", "reason": "gathering_cap"}
+        for e in h.io.events
+    )
+    await h.router.reconcile()
+    assert h.router.sessions == {}
+    assert await wait_for(lambda: h.io.tracks == {}, timeout=3)
+    await h.close()
+
+
+async def test_usage_records_follow_contract():
+    cp = FakeControlPlane()
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")], control_plane=cp)
+    h.router.start()
+    assert await wait_for(
+        lambda: any(
+            r["inputSeconds"] > 0 for c in cp.usage_calls for r in c["records"]
+        ),
+        timeout=6,
+    )
+    record = next(r for c in cp.usage_calls for r in c["records"])
+    assert set(record) == {
+        "speakerId",
+        "targetLang",
+        "provider",
+        "inputSeconds",
+        "outputSeconds",
+        "sessionSeconds",
+        "periodStart",
+        "periodEnd",
+        "errors",
+        "firstAudioMs",
+    }
+    assert cp.usage_calls[0]["room"] == "grp_test"
+    await h.close()
+
+
+async def test_mute_triggers_grace_teardown():
+    a = human("a", "es", "es")
+    b = human("b", "pl", "pl")
+    h = Harness([a, b])
+    h.router.start()
+    assert await wait_for(lambda: ("a", "pl") in h.pairs(), timeout=5)
+    pub = next(iter(a.track_publications.values()))
+    pub.muted = True
+    h.room.emit("track_muted", pub, a)
+    await asyncio.sleep(0.1)
+    assert ("a", "pl") in h.pairs(), "kept warm during grace"
+    assert await wait_for(lambda: ("a", "pl") not in h.pairs(), timeout=3)
+    await h.close()
+
+
+async def test_language_change_retargets_sessions():
+    a = human("a", "es", "es")
+    b = human("b", "pl", "pl")
+    h = Harness([a, b])
+    h.router.start()
+    assert await wait_for(lambda: h.pairs() == {("a", "pl"), ("b", "es")}, timeout=5)
+    b.attributes["listen_lang"] = "en"
+    h.room.emit("participant_attributes_changed", {"listen_lang": "en"}, b)
+    assert await wait_for(lambda: ("a", "en") in h.pairs(), timeout=5)
+    assert await wait_for(lambda: ("a", "pl") not in h.pairs(), timeout=3)
+    await h.close()
+
+
+async def test_switching_to_auto_recreates_with_echo():
+    a = human("a", "es", "pl")
+    b = human("b", "en", "en")
+    h = Harness([a, b])
+    h.router.start()
+    assert await wait_for(lambda: ("a", "en") in h.pairs(), timeout=5)
+    assert (
+        h.router.sessions[next(k for k in h.router.sessions if k.speaker == "a")]._echo
+        is False
+    )
+    a.attributes["speak_lang"] = "auto"
+    h.room.emit("participant_attributes_changed", {"speak_lang": "auto"}, a)
+    assert await wait_for(
+        lambda: any(k.speaker == "a" and s._echo for k, s in h.router.sessions.items()),
+        timeout=5,
+    )
+    await h.close()
+
+
+async def test_speaker_leaving_closes_sessions_immediately():
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")])
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    h.room.remove("a")
+    assert await wait_for(lambda: ("a", "pl") not in h.pairs(), timeout=1)
+    await h.close()
+
+
+async def test_idle_room_shuts_down_job():
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")])
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    h.room.remove("a")
+    h.room.remove("b")
+    assert await wait_for(lambda: h.shutdowns == ["idle"], timeout=5)
+    assert h.router.sessions == {}
+    await h.close()
+
+
+async def test_comparison_tracks_when_enabled():
+    providers = {
+        "gemini": MockProvider(delay_ms=200, name="gemini"),
+        "openai": MockProvider(
+            delay_ms=200, name="openai", supported_targets=frozenset({"en", "es"})
+        ),
+    }
+    h = Harness(
+        [human("a", "pl", "pl"), human("b", "es", "es")],
+        providers=providers,
+        settings=fast(translation_provider="gemini", provider_compare=True),
+    )
+    h.router.start()
+    assert await wait_for(
+        lambda: len(h.router.sessions) == 2 and len(h.router.compare_sessions) == 1,
+        timeout=5,
+    )
+    names = h.io.track_names()
+    # OpenAI cannot target Polish, so only the a->es pair gets a comparison track.
+    assert "txc:a:es:openai" in names
+    assert not any(n.startswith("txc:b:pl") for n in names)
+    await h.close()
+
+
+async def test_openai_default_still_serves_polish_via_gemini():
+    providers = {
+        "gemini": MockProvider(delay_ms=200, name="gemini"),
+        "openai": MockProvider(
+            delay_ms=200, name="openai", supported_targets=frozenset({"en", "es"})
+        ),
+    }
+    h = Harness(
+        [human("a", "es", "es"), human("b", "pl", "pl")],
+        providers=providers,
+        settings=fast(translation_provider="openai"),
+    )
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    by_target = {k.target: s.provider.name for k, s in h.router.sessions.items()}
+    assert by_target == {"pl": "gemini", "es": "openai"}
+    await h.close()

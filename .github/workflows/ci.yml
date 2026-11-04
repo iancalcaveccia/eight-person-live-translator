@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version comes from package.json "packageManager"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+      - run: pnpm test
+      - run: pnpm run build
+      - name: No server secrets in client bundles
+        run: |
+          if grep -rlE "LIVEKIT_API_SECRET|GEMINI_API_KEY|OPENAI_API_KEY|DATABASE_URL|INTERNAL_API_SECRET|HOST_ACCESS_CODE" .next/static; then
+            echo "secret variable names found in client bundle" && exit 1
+          fi
+
+  worker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: translator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q

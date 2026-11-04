@@ -40,3 +40,17 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local embedded dev database (PGlite)
+/.data/
+
+# e2e artifacts
+/test-results/
+/playwright-report/
+/tests/e2e/.artifacts/
+
+# generated E2E audio fixtures (tests/e2e/make-fixtures.ps1)
+/tests/e2e/fixtures/*.wav
+
+# locally generated deployment secrets (scripts/configure-cloud.ps1)
+/.secrets/
