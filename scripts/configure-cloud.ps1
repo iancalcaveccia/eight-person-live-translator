@@ -63,8 +63,13 @@ function Test-VercelLoggedIn {
 }
 if (-not (Test-VercelLoggedIn)) {
   Write-Host ""
-  Write-Host "STEP 1 of 2: sign in to Vercel. A browser page opens (or a link and code are shown below); approve it there." -ForegroundColor Cyan
-  vercel login
+  Write-Host "STEP 1 of 2: sign in to Vercel. Ctrl+click the vercel.com link below and press Confirm in the browser." -ForegroundColor Cyan
+  Write-Host "If the code expires before you get to it, a new link appears here automatically."
+  # Device codes expire after a few minutes; keep issuing fresh ones instead of failing.
+  for ($attempt = 1; $attempt -le 12 -and -not (Test-VercelLoggedIn); $attempt++) {
+    if ($attempt -gt 1) { Write-Host ""; Write-Host "New sign-in link (the previous one expired):" -ForegroundColor Yellow }
+    vercel login
+  }
   if (-not (Test-VercelLoggedIn)) { throw "Vercel sign-in did not complete. Run this script again." }
 }
 Write-Host "Vercel: signed in."
