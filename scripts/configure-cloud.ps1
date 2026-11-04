@@ -55,6 +55,20 @@ function New-Secret([int]$bytes = 32) {
   return [Convert]::ToBase64String($b).TrimEnd("=").Replace("+", "-").Replace("/", "_")
 }
 
+# ---------------------------------------------------------------- Step 1: Vercel sign-in
+# Both things only you can do (Vercel sign-in, Gemini key) happen first; everything after runs unattended.
+function Test-VercelLoggedIn {
+  cmd /c "vercel whoami < NUL > NUL 2>&1"
+  return ($LASTEXITCODE -eq 0)
+}
+if (-not (Test-VercelLoggedIn)) {
+  Write-Host ""
+  Write-Host "STEP 1 of 2: sign in to Vercel. A browser page opens (or a link and code are shown below); approve it there." -ForegroundColor Cyan
+  vercel login
+  if (-not (Test-VercelLoggedIn)) { throw "Vercel sign-in did not complete. Run this script again." }
+}
+Write-Host "Vercel: signed in."
+
 $worker = Read-EnvFile "translator/.env.local"
 
 # LiveKit credentials: translator/.env.local if filled in, otherwise the project
@@ -83,7 +97,7 @@ if (-not ($worker["LIVEKIT_URL"] -and $worker["LIVEKIT_API_KEY"] -and $worker["L
 if (-not $worker["GEMINI_API_KEY"]) {
   # Ask for the key in this terminal (input is masked) and save it to translator/.env.local.
   Write-Host ""
-  Write-Host "Paste your Gemini API key (from https://aistudio.google.com/apikey) and press Enter."
+  Write-Host "STEP 2 of 2: paste your Gemini API key (from https://aistudio.google.com/apikey) and press Enter." -ForegroundColor Cyan
   Write-Host "It shows as *** and is saved only to translator/.env.local on this PC."
   $secure = Read-Host -AsSecureString "Gemini API key"
   $plain = ([System.Net.NetworkCredential]::new("", $secure).Password).Trim().Trim('"')
@@ -138,10 +152,14 @@ Set-Content -Encoding ascii (Join-Path $state "host-access-code.txt") $HostCode
 function Set-VercelEnv($name, $value, [switch]$Plain) {
   foreach ($target in "production", "preview") {
     # --value (not a stdin pipe): Windows PowerShell 5.1 would append a newline to piped values.
-    $flags = @("env", "add", $name, $target, "--value", $value, "--force", "--yes")
+    # --non-interactive: fail with a message instead of waiting on a hidden prompt.
+    $flags = @("env", "add", $name, $target, "--value", $value, "--force", "--yes", "--non-interactive")
     if (-not $Plain) { $flags += "--sensitive" }
-    vercel @flags | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "vercel env add $name $target failed" }
+    $result = vercel @flags 2>&1
+    if ($LASTEXITCODE -ne 0) {
+      $why = ($result | ForEach-Object { "$_" } | Where-Object { $_ -match 'Error|error' } | Select-Object -Last 2) -join " "
+      throw "vercel env add $name $target failed. $why"
+    }
   }
   Write-Host "  set $name"
 }
@@ -174,11 +192,11 @@ try {
   try {
     if (Test-Path "livekit.toml") {
       Write-Host "Updating LiveKit agent secrets and deploying…"
-      & $lk agent update-secrets --secrets-file $tmp
-      & $lk agent deploy
+      & $lk agent update-secrets --yes --secrets-file $tmp
+      & $lk agent deploy --yes
     } else {
-      Write-Host "Creating LiveKit agent in eu-central (Frankfurt)…"
-      & $lk agent create --region eu-central --secrets-file $tmp .
+      Write-Host "Creating LiveKit agent in eu-central (Frankfurt); the cloud build takes a few minutes…"
+      & $lk agent create --yes --region eu-central --secrets-file $tmp .
     }
     if ($LASTEXITCODE -ne 0) { throw "LiveKit agent deployment failed" }
     & $lk agent status
