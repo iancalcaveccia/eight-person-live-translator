@@ -369,6 +369,10 @@ class BleedGuard:
             new * self.BIN_MS,
         )
 
+    def source_of(self, speaker: str) -> str | None:
+        """Whose voice `speaker`'s mic was last flagged as carrying."""
+        return self._source.get(speaker)
+
     def offset_ms(self, victim: str, source: str) -> int | None:
         """Measured stream offset for a pair (None until aligned); for logs/tests."""
         x, y = (victim, source) if victim < source else (source, victim)
@@ -724,6 +728,30 @@ def simple_resampler_factory(in_rate: int, out_rate: int) -> Resampler:
 OnsetCallback = Callable[[str, float], None]
 
 
+class LevelHistory:
+    """The last few seconds of one mic's per-frame loudness.
+
+    Used by the cross-talk detector to tell which of two mics carrying the
+    same words is the near one; independent of the bleed guard's switch."""
+
+    def __init__(self, keep_sec: float = 8.0) -> None:
+        self._keep = keep_sec
+        self._items: deque[tuple[float, float]] = deque()
+
+    def add(self, ts: float, level_db: float) -> None:
+        self._items.append((ts, level_db))
+        cutoff = ts - self._keep
+        while self._items and self._items[0][0] < cutoff:
+            self._items.popleft()
+
+    def loudness(self, since: float, q: float = 80.0) -> float | None:
+        """`q`-th percentile dBFS of frames since `since` (None if < 0.2 s)."""
+        vals = [lv for ts, lv in self._items if ts >= since]
+        if len(vals) < 20:
+            return None
+        return float(np.percentile(vals, q))
+
+
 class SpeakerInput:
     """Reads one speaker's mic once and fans it out to sessions."""
 
@@ -734,6 +762,7 @@ class SpeakerInput:
         frames: AsyncIterator[bytes],
         settings: Settings,
         bleed_guard: BleedGuard | None = None,
+        crosstalk: Any = None,
         on_onset: OnsetCallback | None = None,
         resampler_factory: Callable[[int, int], Resampler] = default_resampler_factory,
         capture_rate: int = INPUT_CAPTURE_SAMPLE_RATE,
@@ -744,6 +773,8 @@ class SpeakerInput:
         self._frames = frames
         self._settings = settings
         self._guard = bleed_guard
+        # crosstalk.CrossTalkDetector (typed loosely: audio.py stays import-free).
+        self._crosstalk = crosstalk
         self._on_onset = on_onset
         self._resampler_factory = resampler_factory
         self._capture_rate = capture_rate
@@ -760,6 +791,7 @@ class SpeakerInput:
         self.speech_active = False
         self.frames_read = 0
         self.bleed_frames = 0
+        self.levels = LevelHistory()
 
     def start(self) -> None:
         if self._task is None:
@@ -805,6 +837,12 @@ class SpeakerInput:
         self.frames_read += 1
         samples = np.frombuffer(pcm, dtype=np.int16)
         level = energy_dbfs(samples)
+        self.levels.add(now, level)
+        if self._crosstalk is not None:
+            try:
+                self._crosstalk.note_level(self.identity, level, now)
+            except Exception:  # never let the side check break capture
+                logger.debug("crosstalk level update failed", exc_info=True)
         try:
             vad_speech = self._vad.update(level)
         except Exception:  # fail open
@@ -820,6 +858,18 @@ class SpeakerInput:
         speech = vad_speech and not bleed
         if bleed:
             self.bleed_frames += 1
+            if self._crosstalk is not None and self._guard is not None:
+                # Hand the guard's finding to the words check: it keeps the
+                # stream muted for the whole stretch, including the parts the
+                # guard misses (live simulation 2026-11-17: with the guard
+                # chopping the leak, too few words reached the provider and
+                # 5 wrong captions stayed on screen).
+                try:
+                    self._crosstalk.note_guard_leak(
+                        self.identity, self._guard.source_of(self.identity), now
+                    )
+                except Exception:
+                    logger.debug("crosstalk guard hand-off failed", exc_info=True)
 
         frame_ms = samples.size * 1000.0 / self._capture_rate
         if speech:

@@ -134,6 +134,15 @@ class Settings:
     bleed_own_voice_rise_db: float = 10.0
     bleed_own_voice_hold_ms: int = 1500
     bleed_own_voice_persist_ms: int = 80
+    # Same words on two mics (crosstalk.py). Second real session 2026-11-17:
+    # the loudness guard above caught 0 s on real phones while the provider kept
+    # transcribing the other person; their words are the robust signal.
+    crosstalk_guard: bool = True
+    crosstalk_window_sec: float = 6.0
+    crosstalk_min_words: int = 3
+    crosstalk_min_share: float = 0.3
+    crosstalk_hold_sec: float = 4.0
+    crosstalk_level_margin_db: float = 6.0
 
     # Output / backlog
     output_queue_ms: int = 30000
@@ -219,6 +228,10 @@ def load_settings() -> Settings:
         input_gate=_env_bool("INPUT_GATE", True),
         bleed_guard=_env_bool("BLEED_GUARD", True),
         bleed_max_offset_ms=_env_int("BLEED_MAX_OFFSET_MS", 600),
+        crosstalk_guard=_env_bool("CROSSTALK_GUARD", True),
+        crosstalk_min_words=_env_int("CROSSTALK_MIN_WORDS", 3),
+        crosstalk_hold_sec=_env_float("CROSSTALK_HOLD_SEC", 4.0),
+        crosstalk_level_margin_db=_env_float("CROSSTALK_LEVEL_MARGIN_DB", 6.0),
         gemini_chunk_ms=_env_int("GEMINI_CHUNK_MS", 100),
         openai_chunk_ms=_env_int("OPENAI_CHUNK_MS", 100),
         gate_pre_roll_ms=_env_int("GATE_PRE_ROLL_MS", 600),

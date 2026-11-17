@@ -285,6 +285,7 @@ Worker (`translator/.env.local`, LiveKit Cloud secrets):
 | `INTERNAL_API_SECRET` | production | |
 | `INPUT_GATE` | no | `true` |
 | `BLEED_GUARD` | no | `true` |
+| `CROSSTALK_GUARD` | no | `true` (same words on two mics; see WORKER.md) |
 
 Control plane (`.env.local`, Vercel env): `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
 `LIVEKIT_API_SECRET`, `DATABASE_URL`, `INTERNAL_API_SECRET`, `HOST_ACCESS_CODE`,

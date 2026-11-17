@@ -63,6 +63,7 @@ import statistics
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import wave
@@ -159,13 +160,26 @@ def token(
     )
 
 
+class _LoopbackSecurePolicy(http.cookiejar.DefaultCookiePolicy):
+    """Browsers treat http://localhost as a secure context and send `Secure`
+    cookies to it; do the same so the probe also works against a local app."""
+
+    def return_ok_secure(self, cookie, request):
+        host = urllib.parse.urlparse(request.get_full_url()).hostname or ""
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return True
+        return super().return_ok_secure(cookie, request)
+
+
 class AppClient:
     """One participant of the deployed web app (its own cookie session)."""
 
     def __init__(self, base: str) -> None:
         self.base = base.rstrip("/")
         self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            urllib.request.HTTPCookieProcessor(
+                http.cookiejar.CookieJar(policy=_LoopbackSecurePolicy())
+            )
         )
 
     def call(self, method: str, path: str, body: dict | None = None) -> dict:

@@ -230,6 +230,126 @@ async def test_captions_that_went_out_before_the_language_label_are_retracted():
     await inp.aclose()
 
 
+async def test_overheard_words_mute_the_stream_and_withdraw_its_captions():
+    """Three-language table: Ola's (pl) mic overhears Ian (es). Her stream to
+    English must not re-voice Ian, and what it already showed is withdrawn."""
+    from crosstalk import CrossTalkDetector
+
+    inp = make_input(silence(4.0), identity="ola")
+    io = FakeRoomIO()
+    det = CrossTalkDetector(hold_sec=1.0)
+    det.set_declared("ian", "es")
+    det.set_declared("ola", "pl")
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, key=key("ola", "en"), crosstalk=det
+    )
+    session.crosstalk_feed = True
+    det.on_hold = lambda who: session.crosstalk_started() if who == "ola" else None
+    sink = track_sink(io, "tx:ola:en")
+
+    # Ola's English stream starts re-voicing Ian before anyone can tell.
+    await session._on_transcript(TranscriptOut(kind="output", text="tomorrow we"))
+    words = [
+        "Mañana",
+        "vamos",
+        "a",
+        "comer",
+        "empanadas",
+        "en",
+        "la",
+        "casa",
+        "de",
+        "mi",
+        "madre",
+    ]
+    for i in range(0, len(words), 3):
+        det.note_input("ian", " ".join(words[i : i + 3]), "es")
+        await session._on_transcript(
+            TranscriptOut(kind="input", text=" ".join(words[i : i + 3]), lang="es")
+        )
+    assert det.is_held("ola")
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    await session._on_transcript(TranscriptOut(kind="output", text="eat empanadas"))
+    await session._flush_outbox()
+    assert not any(rms(p) > 300 for _, p in sink.written)
+    assert session.crosstalk_dropped_sec > 0
+    shown = [c for c in io.captions if c["kind"] == "translation"]
+    assert [c["text"] for c in shown if c["text"]] == ["tomorrow we"]
+    assert any(
+        c.get("retract") == "true" and c["seg"] == shown[0]["seg"] for c in shown
+    )
+
+    # The hold (and the tail after it) lapse once the shared words stop and the
+    # overheard translation pauses: her own speech flows again.
+    await asyncio.sleep(1.4)
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert any(rms(p) > 300 for _, p in sink.written)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def _overhearing_session(hold_sec: float):
+    from crosstalk import CrossTalkDetector
+
+    inp = make_input(silence(5.0), identity="ola")
+    io = FakeRoomIO()
+    det = CrossTalkDetector(hold_sec=hold_sec)
+    det.set_declared("ian", "es")
+    det.set_declared("ola", "pl")
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, key=key("ola", "en"), crosstalk=det
+    )
+    session.crosstalk_feed = True
+    det.on_hold = lambda who: session.crosstalk_started() if who == "ola" else None
+    words = [
+        "Mañana",
+        "vamos",
+        "a",
+        "comer",
+        "empanadas",
+        "en",
+        "la",
+        "casa",
+        "de",
+        "mi",
+        "madre",
+    ]
+    for i in range(0, len(words), 3):
+        det.note_input("ian", " ".join(words[i : i + 3]), "es")
+        await session._on_transcript(
+            TranscriptOut(kind="input", text=" ".join(words[i : i + 3]), lang="es")
+        )
+    assert det.is_held("ola")
+    return inp, io, det, session, track_sink(io, "tx:ola:en")
+
+
+async def test_the_overheard_translation_tail_is_dropped_until_it_pauses():
+    """The provider keeps voicing the overheard speech for seconds after the
+    shared words stop; that tail must not reach the listener either."""
+    inp, _io, det, session, sink = await _overhearing_session(hold_sec=0.3)
+    for _ in range(6):  # continuous output for ~0.9 s, outliving the 0.3 s hold
+        await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+        await asyncio.sleep(0.15)
+    assert not det.is_held("ola")
+    assert not any(rms(p) > 300 for _, p in sink.written)
+    await asyncio.sleep(1.3)  # the overheard translation paused
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert any(rms(p) > 300 for _, p in sink.written)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_own_words_cut_the_tail_short():
+    inp, _io, det, session, sink = await _overhearing_session(hold_sec=3.0)
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert not any(rms(p) > 300 for _, p in sink.written)
+    det.note_input("ola", "Czekaj, poczekajcie chwilę, muszę zadzwonić", "pl")
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert any(rms(p) > 300 for _, p in sink.written)
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_echo_sessions_keep_same_language_output():
     """'I switch languages' speakers use echo sessions on purpose."""
     inp = make_input(silence(3.0))

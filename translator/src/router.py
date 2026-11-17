@@ -33,6 +33,7 @@ from config import (
     Settings,
 )
 from control_plane import ControlPlaneClient, ControlPlaneError, TranslationPolicy
+from crosstalk import CrossTalkDetector
 from events import RoomIO
 from metering import estimate_cost_usd
 from providers import provider_chain
@@ -322,6 +323,17 @@ class TranslationRouter:
             own_voice_hold_ms=settings.bleed_own_voice_hold_ms,
             own_voice_persist_ms=settings.bleed_own_voice_persist_ms,
         )
+        self.crosstalk = CrossTalkDetector(
+            enabled=settings.crosstalk_guard,
+            window_sec=settings.crosstalk_window_sec,
+            min_words=settings.crosstalk_min_words,
+            min_share=settings.crosstalk_min_share,
+            hold_sec=settings.crosstalk_hold_sec,
+            level_margin_db=settings.crosstalk_level_margin_db,
+            level_fn=self._mic_loudness,
+            on_hold=self._on_crosstalk_hold,
+            clock=clock,
+        )
         self.admission = AdmissionManager(
             client=control_plane,
             room_name=getattr(room, "name", ""),
@@ -417,6 +429,8 @@ class TranslationRouter:
                 await task
         await self._close_all_sessions("shutdown")
         await self._await_detached()
+        for identity in list(self.inputs):
+            self.crosstalk.forget(identity)  # logs per-speaker counts
         await asyncio.gather(
             *(i.aclose() for i in self.inputs.values()), return_exceptions=True
         )
@@ -440,9 +454,22 @@ class TranslationRouter:
         self._last_human_seen = self._clock()
         self.admission.note_present(p.identity, (p.attributes or {}).get(ATTR_EPOCH))
 
+    def _mic_loudness(self, identity: str, since: float) -> float | None:
+        inp = self.inputs.get(identity)
+        return inp.levels.loudness(since) if inp is not None else None
+
+    def _on_crosstalk_hold(self, identity: str) -> None:
+        for key, session in list(self.sessions.items()):
+            if key.speaker == identity:
+                session.crosstalk_started()
+        for (key, _name), session in list(self.compare_sessions.items()):
+            if key.speaker == identity:
+                session.crosstalk_started()
+
     def _on_participant_left(self, identity: str) -> None:
         self._speaker_tracks.pop(identity, None)
         self.admission.note_left(identity)
+        self.crosstalk.forget(identity)
         for key in [k for k in self.sessions if k.speaker == identity]:
             self._close_detached(self.sessions.pop(key), "speaker_left")
             grace = self._grace.pop(key, None)
@@ -497,6 +524,8 @@ class TranslationRouter:
         async with self._reconcile_lock:
             humans = self.admitted_humans()
             self._sync_inputs(humans)
+            for h in humans:
+                self.crosstalk.set_declared(h.identity, h.speak_lang)
             desired_pairs = compute_demand(humans) if self.translation_allowed else {}
             desired = {
                 SessionKey(self.gathering_id, self.group_id, s, t): echo
@@ -549,6 +578,7 @@ class TranslationRouter:
                     echo_target=echo,
                     room_io=self._io,
                     settings=self._settings,
+                    crosstalk=self.crosstalk,
                     resampler_factory=self._resampler_factory,
                 )
                 self.sessions[key] = session
@@ -575,6 +605,8 @@ class TranslationRouter:
             first = min(keys, key=lambda k: k.target)
             for k in keys:
                 self.sessions[k].publish_source = k == first
+                # The same session hands this speaker's words to the cross-talk check.
+                self.sessions[k].crosstalk_feed = k == first
 
     async def _reconcile_comparisons(self, desired: dict[SessionKey, bool]) -> None:
         wanted: set[tuple[SessionKey, str]] = set()
@@ -612,6 +644,7 @@ class TranslationRouter:
                 publish_captions=False,
                 publish_source=False,
                 emit_events=False,
+                crosstalk=self.crosstalk,
                 resampler_factory=self._resampler_factory,
             )
             self.compare_sessions[ck] = session
@@ -644,6 +677,7 @@ class TranslationRouter:
                 frames=self._frames_factory(track),
                 settings=self._settings,
                 bleed_guard=self.bleed_guard,
+                crosstalk=self.crosstalk,
                 on_onset=self._on_onset,
                 resampler_factory=self._resampler_factory,
             )

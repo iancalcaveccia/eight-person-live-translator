@@ -110,6 +110,52 @@ async def test_source_caption_designation_one_per_speaker():
     await h.close()
 
 
+async def test_crosstalk_is_fed_once_per_speaker_and_mutes_all_their_streams():
+    people = [
+        human("a", "es", "es"),
+        human("b", "pl", "pl"),
+        human("c", "en", "en", muted=True),
+    ]
+    h = Harness(people)
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 4, timeout=5)
+    feeds = {
+        (k.speaker, k.target): s.crosstalk_feed for k, s in h.router.sessions.items()
+    }
+    assert feeds == {
+        ("a", "en"): True,
+        ("a", "pl"): False,
+        ("b", "en"): True,
+        ("b", "es"): False,
+    }
+    det = h.router.crosstalk
+    assert det._mics["a"].declared == "es" and det._mics["b"].declared == "pl"
+
+    # b's mic carries a's Spanish: both of b's streams are told to stop.
+    started: list[str] = []
+    for k, s in h.router.sessions.items():
+        s.crosstalk_started = lambda k=k: started.append(f"{k.speaker}->{k.target}")
+    words = [
+        "Mañana",
+        "vamos",
+        "a",
+        "comer",
+        "empanadas",
+        "en",
+        "la",
+        "casa",
+        "de",
+        "mi",
+        "madre",
+    ]
+    for i in range(0, len(words), 3):
+        det.note_input("a", " ".join(words[i : i + 3]), "es")
+        det.note_input("b", " ".join(words[i : i + 3]), "es")
+    assert sorted(started) == ["b->en", "b->es"]
+    assert det.is_held("b") and not det.is_held("a")
+    await h.close()
+
+
 async def test_admission_denial_evicts_and_excludes_from_demand():
     cp = FakeControlPlane()
     cp.denied["intruder"] = "not_in_group"

@@ -39,7 +39,7 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **153 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests added 2026-11-17 |
+| Worker unit tests | `cd translator && uv run pytest` | **185 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests, and 32 for the same-words (cross-talk) check added 2026-11-17 (every rule mutation-checked: removing it fails a test) |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -246,7 +246,30 @@ the session finished and asked for a review; no specific problem was reported.
 | Owner's voice on the partner's (Polish) mic | Gemini labelled Spanish **37×** |
 | Bleed guard (loudness-pattern match) | flagged **0.0 s** on both mics. Likely reason: room reverb, browser noise suppression and the headsets' own processing reshape the far voice, so its loudness pattern no longer matches the near one (the simulator's synthetic leak does not model this) |
 | Same-language rule | dropped **95 s** (owner's mic) + **63 s** (partner's mic) of picked-up speech instead of re-voicing it; since `270a7ee` the captions of those stretches are retracted |
-| Consequence | For two people with two different languages the language rule covers the leak. A table with three languages needs a better leak signal than loudness (follow-up, `docs/architecture/WORKER.md`) |
+| Consequence | For two people with two different languages the language rule covers the leak. A table with three languages needed a better signal than loudness → the same-words check, section 5f |
+
+### 5f. Three languages at one table: the same-words check (2026-11-17, local stack + real Gemini)
+
+Local LiveKit `--dev`, the built web app and a local worker with **real
+Gemini**; `table_sim.py` with Ian (es), Partner (pl), Friend (en) 1 m apart
+(−20 dB leak + reverb, one phone 250 ms late), 30 s monologues each and a 2 s
+Polish interjection over the English one. The loudness guard was switched
+off to stand in for real phones, where it caught 0 s. Only runs published in
+real time count (two overloaded runs, 1.14× and 1.21×, discarded).
+
+| Worker | Overheard speech re-voiced (6 tracks, ~2 min) | Wrong-name captions | Real translations heard | First audio median |
+|---|---|---|---|---|
+| Loudness guard off, same-words check off | **157.9 s** | 9 | 8/8 | 6.6 s |
+| Same-words check only, run A / B | **3.7 s / 4.6 s** | 0 / 0 | 8/8 / 8/8 (interjection included) | 4.0 / 4.2 s |
+| Both on (production setting) | **3.4 s** | 2 | 8/8 | 2.6 s |
+
+Getting there took four rounds, each found in the run before: judging every
+matching mic (two far mics matched each other better than the speaker),
+loudness for the owner's own voice (a 2 s interjection was muted, 6/8),
+keeping the hold through mis-transcribed stretches and pauses, and a
+non-Latin-script fallback (a far Polish voice came back spelled in Cyrillic
+as 'ru'). Raw data: `docs/results/2026-11-17-sim-three-lang-*.json`.
+**Not yet run on real phones.**
 
 ### 5e. Phone layout, saved tables, home-screen app, pocket mode (2026-11-17)
 

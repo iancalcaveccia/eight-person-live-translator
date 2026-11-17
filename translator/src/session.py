@@ -31,6 +31,7 @@ from audio import (
     default_resampler_factory,
 )
 from config import Settings
+from crosstalk import CrossTalkDetector
 from events import RoomIO
 from metering import SessionMeter, percentile
 from providers.base import (
@@ -52,6 +53,10 @@ HEALTHY_STREAM_SEC = 10.0
 # Input transcripts arrive about once a second; keep dropping output this long
 # after the last one that said "already in the target language".
 SAME_LANGUAGE_HOLD_SEC = 3.0
+# After a cross-talk hold ends, the provider may still be voicing the overheard
+# speech (it lags the input by seconds). Keep dropping that audio until it
+# pauses for this long, unless the speaker's own words were just heard.
+CROSSTALK_TAIL_GAP_SEC = 1.2
 
 
 @dataclass(frozen=True)
@@ -165,6 +170,7 @@ class TranslationSession:
         publish_captions: bool = True,
         publish_source: bool = False,
         emit_events: bool = True,
+        crosstalk: CrossTalkDetector | None = None,
         resampler_factory: Callable[[int, int], Any] = default_resampler_factory,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -203,6 +209,12 @@ class TranslationSession:
         self._same_lang_until = 0.0  # drop output until then (input = target lang)
         self.same_language_segments = 0
         self.same_language_dropped_sec = 0.0
+        # Room-wide "same words on two mics" detector; exactly one session per
+        # speaker feeds it that speaker's input transcript (set by the router).
+        self._crosstalk = crosstalk
+        self.crosstalk_feed = False
+        self.crosstalk_dropped_sec = 0.0
+        self._crosstalk_tail_until = 0.0
         # Provider's input language labels, counts only (no text).
         self.heard_languages: dict[str, int] = {}
         self._need_reconnect = asyncio.Event()
@@ -397,11 +409,13 @@ class TranslationSession:
         await self._set_state("stopped", reason=reason)
         await self._flush_outbox()
         logger.info(
-            "session closed %s (%s) heard_languages=%s same_language_dropped=%.1fs",
+            "session closed %s (%s) heard_languages=%s same_language_dropped=%.1fs "
+            "crosstalk_dropped=%.1fs",
             self.key.short(),
             reason,
             self.heard_languages,
             self.same_language_dropped_sec,
+            self.crosstalk_dropped_sec,
         )
 
     # --- state/events ---------------------------------------------------------
@@ -646,12 +660,35 @@ class TranslationSession:
         finally:
             self._rotating = False
 
+    def _crosstalk_held(self) -> bool:
+        return self._crosstalk is not None and self._crosstalk.is_held(self.key.speaker)
+
+    def crosstalk_started(self) -> None:
+        """This speaker's mic was just found carrying someone else's words:
+        stop what is queued and withdraw captions already on screen."""
+        if self._sink is not None:
+            self._sink.clear()
+        if self._publish_captions:
+            self._captions.retract(SAME_LANGUAGE_HOLD_SEC)
+            if self.publish_source:
+                self._source_captions.retract(SAME_LANGUAGE_HOLD_SEC)
+
     async def _on_audio(self, ev: AudioOut) -> None:
         assert self._sink is not None
         now = self._clock()
         if now < self._same_lang_until:
             self.meter.output_seconds += ev.duration_sec  # still billed upstream
             self.same_language_dropped_sec += ev.duration_sec
+            return
+        if self._crosstalk_held() or (
+            now < self._crosstalk_tail_until
+            and self._crosstalk is not None
+            and not self._crosstalk.speaking_own(self.key.speaker)
+        ):
+            self.meter.output_seconds += ev.duration_sec  # still billed upstream
+            self.crosstalk_dropped_sec += ev.duration_sec
+            if not self._backlog.is_silent(ev.pcm):
+                self._crosstalk_tail_until = now + CROSSTALK_TAIL_GAP_SEC
             return
         pcm = ev.pcm
         if ev.sample_rate != OUTPUT_SAMPLE_RATE:
@@ -736,10 +773,15 @@ class TranslationSession:
 
     async def _on_transcript(self, ev: TranscriptOut) -> None:
         self._note_input_language(ev)
+        if ev.kind == "input" and self.crosstalk_feed and self._crosstalk is not None:
+            # May mark this speaker (or the one they overhear) as leaking.
+            self._crosstalk.note_input(self.key.speaker, ev.text, ev.lang)
         if not self._publish_captions:
             return
         if ev.kind == "output" and self._clock() < self._same_lang_until:
             return
+        if self._crosstalk_held():
+            return  # neither the overheard words nor their translation
         provider = self.provider.name
         self._captions.provider = provider
         self._source_captions.provider = provider

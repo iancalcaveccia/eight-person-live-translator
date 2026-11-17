@@ -154,10 +154,57 @@ phones the far voice passes through room reverb, the browser's noise
 suppression and the Bluetooth headset's own processing, so its loudness
 envelope no longer tracks the near copy; the synthetic leak in the simulator
 did not model that. With two people and two languages the language rule is
-enough. For a table with three languages, the next step is a leak signal that
-survives that processing — e.g. matching the *source-language transcripts*
-of two mics within the same few seconds — and widening `BLEED_MAX_OFFSET_MS`
-to ~1000 ms (re-run `scripts/bleed_bench.py` first).
+enough; with three languages it is not (a Polish mic overhearing Spanish is
+muted for the Spanish listener, but still re-voiced into English for a third
+person). Hence the third line below.
+
+### Third line: the same words on two mics — `CROSSTALK_GUARD=true` (`src/crosstalk.py`)
+
+Every speaker's provider stream returns an input transcript about once a
+second. The detector keeps the last 6 s of each mic's content words (folded,
+filler removed; never logged) and, for each new chunk, looks for another mic
+whose recent words contain it (≥ 3 shared words in order, the chunk mostly
+theirs; one-or-two-letter transcription errors tolerated). It judges **every**
+such mic, not just the closest match: two mics overhearing the same speaker
+match each other at least as well as they match the speaker.
+
+Who is leaking: (1) **language** — the mic labelled in its owner's declared
+language is the source, the other the leak; (2) else **loudness** — the
+source's mic ≥ 6 dB louder over the last 3 s; (3) else nothing (fail open).
+A chunk spelled mostly outside the Latin alphabet (Gemini once wrote a far
+Polish voice in Cyrillic as 'ru') on a mic whose owner speaks en/pl/es, while
+another mic is ≥ 6 dB louder, also counts as overheard. The loudness guard
+above hands its own findings over as well.
+
+Once a mic is known to overhear someone, loudness takes over frame by frame
+(it survives mis-transcribed stretches): the hold lasts while the overheard
+person keeps talking; their **own voice** (≥ 10 dB above the overheard copy
+and within 10 dB of a near voice) lifts it at once and protects their stream
+for 4.5 s after it was last heard, because their translation comes out
+seconds later; if the overheard person goes on after a pause or after the
+owner's interjection, the hold returns at once (memory 8 s). While held, all
+of that speaker's streams drop translated audio and captions, clear queued
+audio, and retract the caption segment already shown; after the hold, a
+still-running overheard translation is dropped until it pauses (1.2 s).
+
+Results — local stack (LiveKit `--dev`, built web app, local worker, **real
+Gemini**), `table_sim.py` with three people 1 m apart (Ian es, Partner pl,
+Friend en; −20 dB leak, reverb, Partner's phone 250 ms late), 30 s monologues
+plus a 2 s Polish interjection over the English one; raw data in
+`docs/results/2026-11-17-sim-three-lang-*.json`. The loudness guard was
+switched off to stand in for real phones, where it caught nothing:
+
+| Worker | Overheard speech re-voiced | Wrong-name captions | Real translations heard |
+|---|---|---|---|
+| Loudness guard off, words check off | **157.9 s** | 9 | 8/8 |
+| Words check only (2 runs) | **3.7 s / 4.6 s** | 0 / 0 | 8/8 (interjection too) |
+| Both on (production) | **3.4 s** | 2 | 8/8 |
+
+The rest is the first 0.3–1.5 s of each overheard stretch, before three words
+can be compared. Runs where the PC could not publish in real time (ratio >
+1.05, translations 12–25 s behind) were discarded. Synthetic voices and rooms
+again: the next two-phone session is the real judge (worker logs now say
+`crosstalk <mic> hears <mic> … by language/loudness; levels A vs B dBFS`).
 
 Results (synthetic voices, synthetic room; live = deployed app + real Gemini):
 
@@ -241,6 +288,11 @@ cancellation) is a paid LiveKit Cloud feature beyond 100 min/month.
 | `STREAM_KEEPALIVE_SEC` | 30 | Send 100 ms of silence after this long without input (Gemini idles out at 120 s); 0 disables |
 | `BLEED_GUARD` | true | Same-room leak guard (tunables `bleed_*` in `config.py`, chosen with `scripts/bleed_bench.py`) |
 | `BLEED_MAX_OFFSET_MS` | 600 | How far apart two phones' mic streams may be for the guard to align them |
+| `CROSSTALK_GUARD` | true | Same words on two mics → mute the overhearing mic's translations (`src/crosstalk.py`) |
+| `CROSSTALK_MIN_WORDS` | 3 | Shared content words (in order) before two mics count as carrying the same speech |
+| `CROSSTALK_HOLD_SEC` | 4 | Hold after the last shared words (loudness extends it while the other person talks) |
+| `CROSSTALK_LEVEL_MARGIN_DB` | 6 | Louder-mic margin that decides who is the source when languages can't |
+| `CROSSTALK_DEBUG` | unset | `1` logs per-chunk match counts (never words) — local tuning only |
 | `IDLE_SHUTDOWN_SEC` | 30 | Job shutdown after the last human leaves |
 | `ADMISSION_FAIL_CLOSED_SEC` | 30 | Remove never-admitted humans if the control plane is down |
 | `USAGE_INTERVAL_SEC` | 15 | Usage report period |
