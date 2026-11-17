@@ -112,14 +112,36 @@ Guard now (speaker B, possible source A in the same room):
   ≥ 10 dB above B's leak level, for 80 ms (longer than network skew between
   phones), is B talking → the flag is held off for 1.5 s so interjections
   get through whole.
+- **Align the phones first** (added after the first real two-phone test,
+  see below): each pair of mic streams gets a measured offset. A wide search
+  (±600 ms) only *measures* — a best match with correlation ≥ 0.85 and A
+  ≥ 13 dB louder is a vote; votes are ≥ 600 ms apart and 3 of the last 5
+  must agree within 20 ms. All the rules above are then applied around that
+  offset with the ±120 ms tolerance. The worker logs
+  `bleed alignment <a><-><b>: +NNN ms` when a pair locks, and
+  `bleed guard <id>: N s flagged as another person's voice` when a speaker
+  leaves.
 - **Gate/chunks**: a 100 ms chunk is speech only if its own-speech frames
   outnumber its leak frames; an open gate closes on a leak chunk instead of
   forwarding it during the hangover.
 - **Second line** (`session.py`): output is dropped for 3 s after the
   provider labels the input as already in the target language (safe on real
-  speech: the listener understands it). A broader "foreign label" rule was
-  tried and removed — Gemini's labels for leaked audio are unstable (a
-  speaker's own Polish was labelled 'en') and it dropped real translations.
+  speech: the listener understands it), and the caption segment that already
+  went out is **retracted** (caption attribute `retract`, CONTRACT §5.1), so
+  the text does not stay on screen under the wrong name. A broader "foreign
+  label" rule was tried and removed — Gemini's labels for leaked audio are
+  unstable (a speaker's own Polish was labelled 'en') and it dropped real
+  translations.
+
+First real two-phone test (2026-11-17, ES ↔ PL, two phones with Bluetooth
+headsets in one room): translations understandable, but each person's
+captions sometimes showed the *other* person's words under the wrong name.
+Worker log: the Polish speaker's session heard Spanish 28 times and dropped
+51.5 s of re-voiced audio. Cause: two phones deliver their streams with
+offsets far beyond the original ±120 ms window (Bluetooth + capture
+pipelines); offline a 200 ms offset let ~90 % of a leak through, and the live
+simulator with a 250 ms offset reproduced it (22 s of a listener's own words
+played back, 2 ghost caption segments).
 - **Web**: browser `autoGainControl` is off, so silence no longer pumps a
   neighbour's leak up toward one's own level.
 
@@ -132,6 +154,9 @@ Results (synthetic voices, synthetic room; live = deployed app + real Gemini):
 | Live, 2 people side by side (−12 dB, extreme) | — | 0.3–12 s per 2 min across 4 runs (leak ≈ a soft talker's level) |
 | Offline bench, leaked speech sent at −20 / −28 dB (of 79 s) | 38–57 s | 5.5 / 6.4 s |
 | Offline, soft interjection 6 / 12 dB quieter over a loud talker | — | 0.2 s of 8.9 s lost |
+| Offline, leak sent with phones 200–500 ms apart (−20 dB, of 79 s) | 6–79 s (all 79 s from 350 ms) | 6.3–9.2 s (aligned) |
+| Unit, leak flagged with 250 / 400 / −300 ms offsets (15 cases) | 0–45 % | 100 % once aligned (a few s) |
+| Synthetic sweep, own speech wrongly flagged (192 cases) | 669 frames | 669 frames (no new false flags) |
 | Unit tests | 0 false flags for independent speech at 0/−6/−12 dB (kept) | + burst arrival, soft interjection, gate, majority vote, same-language drop |
 
 Limitations: synthetic voices and rooms; real headset mics, phone noise
@@ -201,6 +226,7 @@ cancellation) is a paid LiveKit Cloud feature beyond 100 min/month.
 | `SESSION_GRACE_SEC` | 10 | Keep a session warm after mute / last listener leaves |
 | `STREAM_KEEPALIVE_SEC` | 30 | Send 100 ms of silence after this long without input (Gemini idles out at 120 s); 0 disables |
 | `BLEED_GUARD` | true | Same-room leak guard (tunables `bleed_*` in `config.py`, chosen with `scripts/bleed_bench.py`) |
+| `BLEED_MAX_OFFSET_MS` | 600 | How far apart two phones' mic streams may be for the guard to align them |
 | `IDLE_SHUTDOWN_SEC` | 30 | Job shutdown after the last human leaves |
 | `ADMISSION_FAIL_CLOSED_SEC` | 30 | Remove never-admitted humans if the control plane is down |
 | `USAGE_INTERVAL_SEC` | 15 | Usage report period |

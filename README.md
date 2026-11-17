@@ -18,10 +18,12 @@ a mobile UI and a provider abstraction (Gemini primary, OpenAI backup).
 > through the live app with synthetic voices: listeners hear the translation
 > about 3.2–4.2 s after a speaker starts, it streams while they talk, and
 > interjections are translated alongside a long speech. Simulated people in
-> one room (mics hearing each other, 1 m apart) no longer get each other's
-> voices translated, and the live screens pass a two-phone walk-through
-> ([docs/TEST_REPORT.md](docs/TEST_REPORT.md)). Every real-phone / Bluetooth
-> test is **not yet run** ([docs/DEVICE_TEST_PLAN.md](docs/DEVICE_TEST_PLAN.md)).
+> one room (mics hearing each other, 1 m apart, phones up to 400 ms out of
+> step) no longer get each other's voices translated, and the live screens
+> pass a two-phone walk-through ([docs/TEST_REPORT.md](docs/TEST_REPORT.md)).
+> One informal two-phone test (ES ↔ PL) found captions under the wrong name,
+> now fixed; the structured phone / Bluetooth plan is **not yet run**
+> ([docs/DEVICE_TEST_PLAN.md](docs/DEVICE_TEST_PLAN.md)).
 
 ## How it works (short)
 

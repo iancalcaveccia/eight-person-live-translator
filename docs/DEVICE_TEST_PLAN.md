@@ -55,4 +55,6 @@ measured delays; use **Copy** of the numbers into this table.
 
 | Date | Test # | Devices / OS / browser / headset | Network | Result | Measured | Notes |
 |---|---|---|---|---|---|---|
-| | | | | NOT RUN | | |
+| 2026-11-17 | 1, 3, 4 (informal) | 2 phones + Bluetooth headsets (models not recorded) | home | PASS (owner's report) | — | ES ↔ PL, Spanish output understandable |
+| 2026-11-17 | 6b | same | home | **FAIL** | worker log: 51.5 s of leaked Spanish re-voiced and dropped | own words shown as captions under the other person's name; fixed in `270a7ee` (phone-offset alignment + caption retraction), **re-test pending** |
+| | all others | | | NOT RUN | | |

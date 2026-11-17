@@ -2,11 +2,12 @@
 
 ```text
 STATUS: DEPLOYED; REAL GEMINI TRANSLATION VERIFIED END-TO-END THROUGH THE LIVE APP
-        (synthetic participants) — phone/Bluetooth tests NOT PERFORMED
+        (synthetic participants) + ONE INFORMAL TWO-PHONE TEST BY THE OWNER (ES <-> PL)
 Milestones: M0–M5 implemented; tested locally (mock) and in production (real Gemini)
 Translation provider + model id: gemini-3.5-live-translate-preview (primary, configured);
             gpt-realtime-translate (backup, en/es only) — NOT configured, NOT exercised
-Real-device tests: NOT PERFORMED (needs two phones; docs/DEVICE_TEST_PLAN.md)
+Real-device tests: ONE informal run 2026-11-17 (section 5c); the structured
+            plan in docs/DEVICE_TEST_PLAN.md is otherwise NOT PERFORMED
 Live URL: https://eight-person-live-translator.vercel.app (verified 2026-11-17, section 6)
 ```
 
@@ -30,12 +31,12 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 
 | Suite | Command | Result |
 |---|---|---|
-| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **65 passed** |
+| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **68 passed** (incl. caption retraction) |
 | Type-check | `pnpm typecheck` | PASS |
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **110 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed and same-language tests added 2026-11-17 |
+| Worker unit tests | `cd translator && uv run pytest` | **153 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests added 2026-11-17 |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -176,6 +177,9 @@ with B's real Polish interjection "Co? Serio?" at 8 s, then both together 12 s.
 | ES/PL couple 1 m apart, after (4 runs) | 6/6 every run | **0.0 s every run** | 2.8–3.2 s |
 | ES/PL/EN, 3 people 1 m apart, after | 8/8 | 1.9 s total (0.3–0.7 s blips, 6 tracks) | 3.2 s |
 | ES/PL couple side by side (−12 dB), after (4 runs) | 6/6 | 0.3–12 s (varies with Gemini's labels) | 2.5–3.7 s |
+| ES/PL 1 m, **one phone 250 ms slower**, worker before alignment (2 runs) | 6/6 | 0 s and **26.7 s** (+ 2 ghost caption segments, 365 chars); worker log: 30 + 45 leaked labels, 32 s + 49.5 s dropped | 3.6 s |
+| ES/PL 1 m, one phone 250 ms slower, **after** alignment (`270a7ee`) | 6/6 | **0 s, 0 ghost captions**; log: 2 + 1 leaked labels, offset measured −220…−260 ms | 3.1 s |
+| ES/PL 1 m, the *other* phone 400 ms slower, after | 6/6 | 0.35 s, 1 ghost caption of 1 character | 2.4 s |
 
 The interjection is translated while the main speaker is still talking; its
 "began before speaker stopped" is false only because a 2 s phrase is
@@ -196,13 +200,29 @@ what is on screen. **PASS** (32 s):
 - Private conversation "Outside": invite → "Join now" → both moved; guest "Leave & return to main" → host no longer visible to her.
 - No page errors. Gathering ended afterwards (HTTP 200).
 
+### 5c. First real two-phone test (owner + partner, 2026-11-17, 16:20–16:27 UTC)
+
+Two people in one room, each with their own phone and Bluetooth headset
+(models not recorded), Spanish (Argentina) ↔ Polish, on the deployed app.
+Reported by the owner; worker logs read afterwards (language labels and
+seconds only, no text or audio):
+
+| What | Result |
+|---|---|
+| Translation into Spanish understandable | **Yes** (owner's report); English check still to do |
+| Speaker labels on captions | **FAIL** — each person sometimes saw their *own* words as a caption under the other person's name |
+| Worker log | Polish speaker's session heard Spanish 28× (and Polish 39×); 51.5 s of re-voiced audio dropped by the same-language rule; the captions had already gone out |
+| Cause | the bleed guard only compared mic streams within ±120 ms; two phones deliver theirs with larger offsets → the partner's mic leak reached Gemini |
+| Fix | stream alignment + caption retraction, `270a7ee`, deployed 2026-11-17 17:07 UTC; reproduced and verified in the live simulator (5a, last three rows) |
+| Re-test on phones | **NOT YET RUN** |
+
 ## 6. Not run (needs your devices or reviewers)
 
 | Item | Why not | How to run |
 |---|---|---|
 | OpenAI backup provider | no `OPENAI_API_KEY` configured (optional) | add it to `translator/.env.local`, re-run `configure-cloud.ps1` |
 | Provider A/B (accuracy, accents, names/numbers, voice consistency) | bilingual reviewers + OpenAI key | `PROVIDER_COMPARE=true`, see `docs/PROVIDERS.md` |
-| Every phone / Bluetooth / screen-lock / network-switch test | no phones attached | `docs/DEVICE_TEST_PLAN.md` |
+| Phone / Bluetooth / screen-lock / network-switch tests (beyond the one informal run in 5c) | needs the owner's phones | `docs/DEVICE_TEST_PLAN.md` |
 | 8 physical devices in one room, acoustic bleed | devices + people | same |
 | Krisp noise / voice-focus filter | requires LiveKit Cloud | toggle in Settings once deployed |
 
@@ -212,7 +232,7 @@ what is on screen. **PASS** (32 s):
 |---|---|---|
 | Web app on Vercel `consultorios/eight-person-live-translator` | **Deployed and functional** | https://eight-person-live-translator.vercel.app, `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"commit":"64c86b9"}`; `/api/config` → `mediaConfigured:true, maxHumans:8, defaultProvider:gemini, perGatheringCapUsd:50`; functions in `fra1` |
 | Postgres | **Neon, eu-central-1**, connected via the Vercel integration | health `database:true`; gatherings created/joined/ended by the probe |
-| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `GqpnhWHh3KoE` (keepalive fix) deployed 2026-11-17 12:46 UTC |
+| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `uQf4AVgJjxV4` (phone-offset alignment, `270a7ee`) deployed 2026-11-17 17:07 UTC; web `/api/health` → `commit 270a7ee` |
 | Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
 | OpenAI key | not configured (optional backup) | — |
 | Open gathering creation (owner's choice, family use) | **On** since 2026-11-17: `OPEN_GATHERING_CREATION=1`, no host code needed to start a gathering; guests still need the invite link; $50/gathering and $200/month caps and the creation rate limit unchanged | live `/api/config` → `hostCodeRequired:false`; `/api/health` → `openCreation:true, commit e37cb35`; live `POST /api/gatherings` without a code → 201, then ended; live form shows no code field |
