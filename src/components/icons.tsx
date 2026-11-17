@@ -3,6 +3,29 @@ import type { SVGProps } from "react";
 type P = SVGProps<SVGSVGElement>;
 const base = { width: 24, height: 24, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true } as const;
 
+export const MoonIcon = (p: P) => (
+  <svg {...base} {...p}>
+    <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />
+  </svg>
+);
+export const UserIcon = (p: P) => (
+  <svg {...base} {...p}>
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 20c.8-3.6 4-6 8-6s7.2 2.4 8 6" />
+  </svg>
+);
+export const HomeAddIcon = (p: P) => (
+  <svg {...base} {...p}>
+    <rect x="5" y="2.5" width="14" height="19" rx="3" />
+    <path d="M12 8.5v6M9 11.5h6M10 18.5h4" />
+  </svg>
+);
+export const LinkIcon = (p: P) => (
+  <svg {...base} {...p}>
+    <path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1" />
+    <path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1" />
+  </svg>
+);
 export const MicIcon = (p: P) => (
   <svg {...base} {...p}>
     <rect x="9" y="3" width="6" height="11" rx="3" />

@@ -103,8 +103,7 @@ export class Client {
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
     });
     const res = await (handler as Handler)(req, { params: Promise.resolve(opts.params ?? {}) });
-    const setCookie = res.headers.get("set-cookie");
-    if (setCookie) {
+    for (const setCookie of res.headers.getSetCookie()) {
       const [pair] = setCookie.split(";");
       const idx = pair.indexOf("=");
       const name = pair.slice(0, idx);

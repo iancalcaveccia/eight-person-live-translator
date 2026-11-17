@@ -47,14 +47,14 @@ test("two phones: create without a code, join by link, live translated captions,
 
   // Ian starts a gathering: no host-code field any more.
   await ian.goto("/");
-  await ian.getByRole("button", { name: "Start a gathering" }).click();
+  await ian.getByRole("button", { name: "Start a table" }).click();
   await expect(ian.getByPlaceholder("Set by the app owner")).toHaveCount(0);
   await ian.getByPlaceholder("Sunday dinner").fill("Walk test");
   await ian.getByPlaceholder("Ian").fill("Ian");
   await ian.getByRole("group", { name: "Language I speak" }).getByRole("button", { name: "Español" }).click();
   await ian.getByRole("group", { name: "Language I want to hear" }).getByRole("button", { name: "Español" }).click();
   await ian.getByRole("group", { name: "Spanish regional preference" }).getByRole("button", { name: "Argentina" }).click();
-  await ian.getByRole("checkbox").check();
+  await ian.getByRole("checkbox", { name: /I am an adult/ }).check();
   await ian.getByRole("button", { name: "Create & get invite" }).click();
   await ian.waitForURL(/\/g\/[0-9a-f-]{36}/);
   const gid = new URL(ian.url()).pathname.split("/")[2];
@@ -72,7 +72,7 @@ test("two phones: create without a code, join by link, live translated captions,
   await expect(kasia.getByRole("button", { name: /Record & play/ })).toBeVisible();
   await expect(kasia.getByLabel("Microphone level")).toBeVisible();
   await kasia.getByRole("button", { name: "Continue" }).click();
-  await kasia.getByRole("checkbox").check();
+  await kasia.getByRole("checkbox", { name: /I am an adult/ }).check();
   await kasia.getByRole("button", { name: "Join the table" }).click();
   await kasia.waitForURL(/\/g\/[0-9a-f-]{36}$/);
 
@@ -116,6 +116,8 @@ test("two phones: create without a code, join by link, live translated captions,
     expect(errors, `page errors: ${errors.join(" | ")}`).toEqual([]);
   } finally {
     const status = await ian.evaluate(async (g) => (await fetch(`/api/gatherings/${g}/end`, { method: "POST" })).status, gid);
-    console.log(`gathering ended: HTTP ${status}`);
+    // Both were remembered (the default): forget them, which also deletes the saved table.
+    const forget = (p: Page) => p.evaluate(async () => (await fetch("/api/me", { method: "DELETE", body: JSON.stringify({ everything: true }) })).status);
+    console.log(`gathering ended: HTTP ${status}; profiles forgotten: ${await forget(ian)}, ${await forget(kasia)}`);
   }
 });

@@ -6,6 +6,8 @@ import type { MediaSession, MediaSnapshot } from "@/client/media/session";
 import { canSelectAudioOutput, isIOS, listDevices, looksLikeHeadset, playTestTone } from "@/client/media/devices";
 import { updateSettings, type ListenerSettings } from "@/client/prefs";
 import LanguagePicker, { type LanguageValue } from "../LanguagePicker";
+import InstallCard from "../InstallCard";
+import { MoonIcon } from "../icons";
 import Sheet from "./Sheet";
 
 export default function SettingsSheet({
@@ -18,6 +20,7 @@ export default function SettingsSheet({
   onLanguages,
   onEnd,
   onLeave,
+  onPocket,
   onClose,
 }: {
   state: GatheringStateView;
@@ -29,6 +32,7 @@ export default function SettingsSheet({
   onLanguages: (v: LanguageValue) => Promise<void>;
   onEnd: () => Promise<void>;
   onLeave: () => Promise<void>;
+  onPocket: () => void;
   onClose: () => void;
 }) {
   const [inputs, setInputs] = useState<MediaDeviceInfo[]>([]);
@@ -186,7 +190,16 @@ export default function SettingsSheet({
       </div>
 
       <div className="sheet-section">
-        <span className="section-label">Screen</span>
+        <span className="section-label">Screen &amp; putting the phone away</span>
+        <p className="small muted">
+          Phones stop a website&apos;s microphone a few seconds after the screen turns off — even when Mesa is on the home
+          screen. {isIOS() ? "On iPhone, sound stops too." : "On Android you can usually still hear the others, but they can't hear you."}{" "}
+          To put the phone in your pocket or face down and keep talking, use <strong>Pocket mode</strong>: the screen
+          stays on but goes black and ignores touches.
+        </p>
+        <button className="btn btn-secondary btn-block" onClick={onPocket}>
+          <MoonIcon width={18} height={18} /> Start pocket mode
+        </button>
         <div className="setting-row">
           <div>
             <div className="setting-title">Keep screen on</div>
@@ -196,11 +209,11 @@ export default function SettingsSheet({
                   ? "Active."
                   : "Not active yet (needs the page in front)."
                 : "Not supported in this browser — keep the screen awake manually."}
-              {isIOS() && " iPhone stops the microphone when the screen locks."}
             </div>
           </div>
           <Switch checked={settings.keepAwake} onChange={(v) => updateSettings({ keepAwake: v })} />
         </div>
+        <InstallCard always />
       </div>
 
       <div className="sheet-section">
@@ -295,10 +308,24 @@ export default function SettingsSheet({
       </div>
 
       <div className="sheet-section">
+        {state.table && (
+          <>
+            <button className="btn btn-secondary btn-block" onClick={() => void onLeave()}>
+              Leave — the others keep talking
+            </button>
+            <p className="small faint">
+              “{state.table.name}” stays on your home screen{state.table.isMember ? "" : " only if you chose to be remembered"}.
+              Tap it any time to sit down again.
+            </p>
+          </>
+        )}
         {isHost ? (
           confirmEnd ? (
             <div className="stack">
-              <p className="small">Everyone will be disconnected and the gathering&apos;s names and groups deleted.</p>
+              <p className="small">
+                Everyone will be disconnected and this session&apos;s names and groups deleted
+                {state.table ? " (the saved table stays)" : ""}.
+              </p>
               <div className="row">
                 <button className="btn btn-ghost grow" onClick={() => setConfirmEnd(false)}>
                   Cancel
@@ -310,13 +337,15 @@ export default function SettingsSheet({
             </div>
           ) : (
             <button className="btn btn-danger btn-block" onClick={() => setConfirmEnd(true)}>
-              End gathering
+              {state.table ? "End for everyone" : "End gathering"}
             </button>
           )
         ) : (
-          <button className="btn btn-danger btn-block" onClick={() => void onLeave()}>
-            Leave gathering
-          </button>
+          !state.table && (
+            <button className="btn btn-danger btn-block" onClick={() => void onLeave()}>
+              Leave gathering
+            </button>
+          )
         )}
       </div>
     </Sheet>

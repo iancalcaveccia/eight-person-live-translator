@@ -29,9 +29,26 @@ export default function PrivacyPage() {
             <li>No audio recordings and no transcripts. Captions exist only in the browsers of the people in the conversation.</li>
             <li>While the gathering is open: names, chosen languages, which conversation each person is in, invitations.</li>
             <li>When the host ends the gathering (or it expires) names, groups and invitations are deleted.</li>
+            <li>
+              Only if you choose <strong>Remember me on this phone</strong>: your name, your languages, when you agreed to
+              live AI interpretation, and your saved tables (their names and who is at them) — until you tap{" "}
+              <strong>Forget me</strong>, or after 400 days without using Mesa.
+            </li>
             <li>Anonymous usage numbers (minutes of interpreted audio, estimated cost, delay measurements) are kept for spending limits.</li>
             <li>Security logs without names or content (e.g. &ldquo;someone tried to join with an invalid link&rdquo;) for 30 days.</li>
           </ul>
+        </section>
+
+        <section className="stack">
+          <h2 className="display h-md">Remembered on this phone</h2>
+          <p className="muted">
+            There is no email, phone number or password. Your phone keeps a long random key in a secure cookie that
+            only Mesa&apos;s server can read; the server stores just a fingerprint (hash) of that key. People who share
+            a saved table with you see your name, your language and whether you are at the table right now — nobody
+            else does. Whoever looks after a table can remove someone; that also replaces the table&apos;s link.
+            Leaving a table, or &ldquo;Forget me&rdquo; (on Mesa&apos;s home screen, under your name), deletes your
+            place for good.
+          </p>
         </section>
 
         <section className="stack">

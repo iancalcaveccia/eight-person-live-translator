@@ -88,9 +88,9 @@ export function sessionCookieName(gatheringId: string): string {
   return `ig_${gatheringId.replace(/-/g, "")}`;
 }
 
-export function serializeSessionCookie(gatheringId: string, value: string, maxAgeSeconds: number): string {
+function serializeCookie(name: string, value: string, maxAgeSeconds: number): string {
   const parts = [
-    `${sessionCookieName(gatheringId)}=${encodeURIComponent(value)}`,
+    `${name}=${encodeURIComponent(value)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -100,8 +100,32 @@ export function serializeSessionCookie(gatheringId: string, value: string, maxAg
   return parts.join("; ");
 }
 
+export function serializeSessionCookie(gatheringId: string, value: string, maxAgeSeconds: number): string {
+  return serializeCookie(sessionCookieName(gatheringId), value, maxAgeSeconds);
+}
+
 export function clearSessionCookie(gatheringId: string): string {
   return serializeSessionCookie(gatheringId, "", 0);
+}
+
+/** "Remember me on this phone": one cookie per device, holding a random secret. */
+export const PERSON_COOKIE = "mesa_me";
+/** Browsers cap cookie lifetimes at 400 days; the cookie is renewed whenever the home screen loads. */
+export const PERSON_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 3600;
+
+export function serializePersonCookie(secret: string): string {
+  return serializeCookie(PERSON_COOKIE, secret, PERSON_COOKIE_MAX_AGE_SECONDS);
+}
+
+export function clearPersonCookie(): string {
+  return serializeCookie(PERSON_COOKIE, "", 0);
+}
+
+/** Response headers carrying several Set-Cookie values (Headers keeps them separate). */
+export function cookieHeaders(...cookies: string[]): Headers {
+  const h = new Headers();
+  for (const c of cookies) h.append("set-cookie", c);
+  return h;
 }
 
 // --------------------------------------------------------- request hygiene

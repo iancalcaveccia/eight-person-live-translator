@@ -81,6 +81,59 @@ export interface GatheringStateView {
   invitations: InvitationView[];
   outgoingInvitations: { id: string; groupId: string; toId: string; toName: string }[];
   budget: BudgetView;
+  /** Set when this gathering is the live session of a saved table. */
+  table: { id: string; name: string; inviteUrlPath: string; isMember: boolean; isOwner: boolean } | null;
+}
+
+// ------------------------------------------------- remembered people & tables
+
+export interface PersonView {
+  id: string;
+  displayName: string;
+  speakLang: SpeakLang;
+  listenLang: ListenLang;
+  esRegion: EsRegion;
+  /** False when the AI-consent text changed since they agreed: ask again before audio flows. */
+  consentCurrent: boolean;
+}
+
+export interface TableMemberView {
+  id: string;
+  displayName: string;
+  speakLang: SpeakLang;
+  role: "owner" | "member";
+  isMe: boolean;
+}
+
+export interface TableView {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  members: TableMemberView[];
+  /** Members may re-share the table's link. */
+  inviteUrlPath: string;
+  /** The table's gathering right now, if one is running. */
+  live: { gatheringId: string; onlineNames: string[]; meIn: boolean } | null;
+}
+
+export interface ContactView {
+  id: string;
+  displayName: string;
+  speakLang: SpeakLang;
+  listenLang: ListenLang;
+  tableNames: string[];
+}
+
+export interface HomeView {
+  person: PersonView | null;
+  tables: TableView[];
+  people: ContactView[];
+}
+
+export interface TablePreview {
+  name: string;
+  memberNames: string[];
+  onlineNames: string[];
 }
 
 export interface MediaTokenView {

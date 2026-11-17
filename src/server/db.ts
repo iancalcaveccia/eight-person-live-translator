@@ -174,7 +174,8 @@ export async function resetDbForTests(): Promise<Db> {
   } else {
     await testDb.query(
       `truncate table app_settings, gatherings, participants, groups, group_members, invitations,
-         usage_records, audit_events, rate_limits restart identity cascade`,
+         usage_records, audit_events, rate_limits, people, person_devices, circles, circle_members
+         restart identity cascade`,
     );
   }
   globalThis.__interpDb = Promise.resolve(testDb);

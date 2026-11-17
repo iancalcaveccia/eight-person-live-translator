@@ -1,4 +1,5 @@
 import { joinGathering } from "@/server/gatherings";
+import { currentPerson } from "@/server/people";
 import {
   ApiError,
   assertSameOrigin,
@@ -29,6 +30,7 @@ export const POST = handle(async (req: Request, ctx: { params: Promise<{ gid: st
       displayName: cleanText(body.displayName, "Your name", 40),
     },
     clientIp(req),
+    (await currentPerson(req))?.id ?? null,
   );
   return json(
     { gatheringId: result.gatheringId, participantId: result.participantId },

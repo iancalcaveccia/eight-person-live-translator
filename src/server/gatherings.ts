@@ -27,6 +27,7 @@ import { getDb, type Queryable } from "./db";
 import { config, CONSENT_VERSION, isHostedDeployment } from "./env";
 import {
   deriveInviteToken,
+  deriveTableInviteToken,
   newId,
   newRoomName,
   newSessionSecret,
@@ -56,6 +57,8 @@ export interface GatheringRow {
   expires_at: Date;
   ended_at: Date | null;
   last_activity_at: Date;
+  /** Saved table this gathering is the live session of (null for one-off gatherings). */
+  circle_id: string | null;
 }
 
 export interface ParticipantRow {
@@ -74,6 +77,8 @@ export interface ParticipantRow {
   last_seen_at: Date;
   left_at: Date | null;
   kicked_at: Date | null;
+  /** Remembered person behind this seat, if they chose "remember me". */
+  person_id: string | null;
 }
 
 export interface GroupRow {
@@ -100,7 +105,7 @@ const iso = (d: Date | string | null | undefined) => (d ? new Date(d).toISOStrin
 
 // ------------------------------------------------------------- app secret
 
-async function getAppSecret(q: Queryable): Promise<string> {
+export async function getAppSecret(q: Queryable): Promise<string> {
   const fromEnv = config.appSecret;
   if (fromEnv) return fromEnv;
   const rows = await q.query<{ value: string }>("select value from app_settings where key = 'app_secret'");
@@ -121,6 +126,14 @@ export async function inviteTokenFor(q: Queryable, g: GatheringRow): Promise<str
 export function inviteUrlPath(gatheringId: string, token: string): string {
   // Token in the fragment: never sent to servers, proxies or Referer headers.
   return `/g/${gatheringId}/join#k=${token}`;
+}
+
+export async function tableInviteTokenFor(q: Queryable, table: { id: string; invite_version: number }): Promise<string> {
+  return deriveTableInviteToken(await getAppSecret(q), table.id, Number(table.invite_version));
+}
+
+export function tableInviteUrlPath(tableId: string, token: string): string {
+  return `/t/${tableId}/join#k=${token}`;
 }
 
 // --------------------------------------------------------------- helpers
@@ -278,56 +291,117 @@ export function hostCodeRequired(): boolean {
   return Boolean(config.hostAccessCode) || isHostedDeployment();
 }
 
-export async function createGathering(input: CreateGatheringInput, ip: string): Promise<JoinResult> {
+/** Who may start new gatherings or saved tables on this deployment. */
+export function assertMayCreate(hostCode: string | undefined): void {
   const required = config.hostAccessCode;
   if (config.openGatheringCreation) {
-    // Owner chose an open deployment: no code. Rate limit and caps below still apply.
+    // Owner chose an open deployment: no code. Rate limits and spending caps still apply.
   } else if (required) {
-    if (!input.hostCode || !safeEqual(input.hostCode, required)) {
+    if (!hostCode || !safeEqual(hostCode, required)) {
       throw new ApiError(403, "bad_host_code", "That host access code is not correct");
     }
   } else if (isHostedDeployment()) {
     throw new ApiError(503, "host_code_not_configured", "Set HOST_ACCESS_CODE on the server to allow creating gatherings");
   }
+}
+
+/** Insert a gathering and its main group (no participants yet). */
+async function insertGatheringTx(
+  t: Queryable,
+  input: { title: string; hostParticipantId: string; budgetUsd?: number; circleId?: string | null },
+): Promise<{ gatheringId: string; mainId: string; lifetimeSeconds: number }> {
+  const cap = config.maxSpendPerGatheringUsd;
+  const budget = Math.min(cap, input.budgetUsd && input.budgetUsd > 0 ? input.budgetUsd : cap);
+  const gatheringId = newId();
+  const mainId = newId();
+  const lifetimeSeconds = config.maxGatheringMinutes * 60;
+  await t.query(
+    `insert into gatherings (id, title, host_participant_id, max_humans, budget_usd, default_provider, expires_at, circle_id)
+     values ($1, $2, $3, $4, $5, $6, now() + ($7 || ' seconds')::interval, $8)`,
+    [
+      gatheringId,
+      input.title,
+      input.hostParticipantId,
+      config.maxHumans,
+      budget,
+      config.defaultProvider,
+      String(lifetimeSeconds),
+      input.circleId ?? null,
+    ],
+  );
+  await t.query(
+    "insert into groups (id, gathering_id, kind, name, livekit_room, created_by) values ($1, $2, 'main', $3, $4, $5)",
+    [mainId, gatheringId, "Main conversation", newRoomName(), input.hostParticipantId],
+  );
+  return { gatheringId, mainId, lifetimeSeconds };
+}
+
+async function insertParticipantTx(
+  t: Queryable,
+  p: {
+    id: string;
+    gatheringId: string;
+    displayName: string;
+    prefs: LanguagePrefs;
+    role: "host" | "guest";
+    color: number;
+    sessionSecret: string;
+    mainId: string;
+    personId: string | null;
+  },
+): Promise<void> {
+  await t.query(
+    `insert into participants
+       (id, gathering_id, display_name, speak_lang, listen_lang, es_region, role, color,
+        session_hash, consent_version, consent_at, active_group_id, person_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11, $12)`,
+    [
+      p.id,
+      p.gatheringId,
+      p.displayName,
+      p.prefs.speakLang,
+      p.prefs.listenLang,
+      p.prefs.esRegion,
+      p.role,
+      p.color,
+      sha256Hex(p.sessionSecret),
+      CONSENT_VERSION,
+      p.mainId,
+      p.personId,
+    ],
+  );
+}
+
+export async function createGathering(
+  input: CreateGatheringInput,
+  ip: string,
+  personId: string | null = null,
+): Promise<JoinResult> {
+  assertMayCreate(input.hostCode);
 
   const db = await getDb();
   await rateLimit(db, `create:${ip}`, 10, 600);
 
-  const cap = config.maxSpendPerGatheringUsd;
-  const budget = Math.min(cap, input.budgetUsd && input.budgetUsd > 0 ? input.budgetUsd : cap);
-  const gatheringId = newId();
   const participantId = newId();
   const sessionSecret = newSessionSecret();
-  const lifetimeSeconds = config.maxGatheringMinutes * 60;
+  let gatheringId = "";
+  let lifetimeSeconds = 0;
 
   await db.tx(async (t) => {
-    await t.query(
-      `insert into gatherings (id, title, host_participant_id, max_humans, budget_usd, default_provider, expires_at)
-       values ($1, $2, $3, $4, $5, $6, now() + ($7 || ' seconds')::interval)`,
-      [gatheringId, input.title, participantId, config.maxHumans, budget, config.defaultProvider, String(lifetimeSeconds)],
-    );
-    const mainId = newId();
-    await t.query(
-      "insert into groups (id, gathering_id, kind, name, livekit_room, created_by) values ($1, $2, 'main', $3, $4, $5)",
-      [mainId, gatheringId, "Main conversation", newRoomName(), participantId],
-    );
-    await t.query(
-      `insert into participants
-         (id, gathering_id, display_name, speak_lang, listen_lang, es_region, role, color,
-          session_hash, consent_version, consent_at, active_group_id)
-       values ($1, $2, $3, $4, $5, $6, 'host', 0, $7, $8, now(), $9)`,
-      [
-        participantId,
-        gatheringId,
-        input.displayName,
-        input.speakLang,
-        input.listenLang,
-        input.esRegion,
-        sha256Hex(sessionSecret),
-        CONSENT_VERSION,
-        mainId,
-      ],
-    );
+    const g = await insertGatheringTx(t, { title: input.title, hostParticipantId: participantId, budgetUsd: input.budgetUsd });
+    gatheringId = g.gatheringId;
+    lifetimeSeconds = g.lifetimeSeconds;
+    await insertParticipantTx(t, {
+      id: participantId,
+      gatheringId,
+      displayName: input.displayName,
+      prefs: input,
+      role: "host",
+      color: 0,
+      sessionSecret,
+      mainId: g.mainId,
+      personId,
+    });
     await audit(t, gatheringId, "gathering_created", participantId, null);
   });
 
@@ -346,7 +420,12 @@ export interface JoinInput extends LanguagePrefs {
   displayName: string;
 }
 
-export async function joinGathering(gatheringId: string, input: JoinInput, ip: string): Promise<JoinResult> {
+export async function joinGathering(
+  gatheringId: string,
+  input: JoinInput,
+  ip: string,
+  personId: string | null = null,
+): Promise<JoinResult> {
   const db = await getDb();
   await rateLimit(db, `join:${ip}`, 30, 600);
 
@@ -373,24 +452,17 @@ export async function joinGathering(gatheringId: string, input: JoinInput, ip: s
     }
     const main = await mainGroup(t, gatheringId);
     const color = pickColor(present.map((p) => p.color));
-    await t.query(
-      `insert into participants
-         (id, gathering_id, display_name, speak_lang, listen_lang, es_region, role, color,
-          session_hash, consent_version, consent_at, active_group_id)
-       values ($1, $2, $3, $4, $5, $6, 'guest', $7, $8, $9, now(), $10)`,
-      [
-        participantId,
-        gatheringId,
-        input.displayName,
-        input.speakLang,
-        input.listenLang,
-        input.esRegion,
-        color,
-        sha256Hex(sessionSecret),
-        CONSENT_VERSION,
-        main.id,
-      ],
-    );
+    await insertParticipantTx(t, {
+      id: participantId,
+      gatheringId,
+      displayName: input.displayName,
+      prefs: input,
+      role: "guest",
+      color,
+      sessionSecret,
+      mainId: main.id,
+      personId,
+    });
     await bumpVersion(t, gatheringId);
     await audit(t, gatheringId, "participant_joined", participantId, null);
     const remainingSeconds = Math.max(60, Math.floor((new Date(g.expires_at).getTime() - Date.now()) / 1000));
@@ -409,6 +481,144 @@ export async function joinGathering(gatheringId: string, input: JoinInput, ip: s
     cookieMaxAgeSeconds: result.remainingSeconds,
     inviteUrlPath: inviteUrlPath(gatheringId, input.inviteToken),
   };
+}
+
+// ------------------------------------------------------------ saved tables
+
+export interface TableEntrant {
+  /** Remembered person (a table member), or null for a guest holding the table link. */
+  personId: string | null;
+  displayName: string;
+  prefs: LanguagePrefs;
+}
+
+/**
+ * Seat someone at a saved table's live gathering, starting a new gathering
+ * when none is running (first person in becomes its host). Authorization
+ * (membership or a valid table link) is checked by the caller.
+ *
+ * A remembered person who already holds a seat in the live gathering (other
+ * phone, reopened app, cleared cookies) gets that seat back with a new
+ * session secret instead of a duplicate seat.
+ */
+export async function enterTableGathering(tableId: string, who: TableEntrant, ip: string): Promise<JoinResult> {
+  const db = await getDb();
+  await rateLimit(db, `enter:${who.personId ?? ip}`, 30, 600);
+  const sessionSecret = newSessionSecret();
+  const idle = String(config.idleEndMinutes);
+
+  const result = await db.tx(async (t) => {
+    const participantId = newId();
+    // Row lock: two people tapping the table at once must land in ONE gathering.
+    const circle = (await t.query<{ id: string; name: string }>("select id, name from circles where id = $1 for update", [tableId]))[0];
+    if (!circle) throw new ApiError(404, "table_not_found", "This table no longer exists");
+    const stale = await t.query<{ id: string }>(
+      `select id from gatherings
+        where circle_id = $1 and ended_at is null
+          and (expires_at <= now() or last_activity_at <= now() - ($2 || ' minutes')::interval)`,
+      [circle.id, idle],
+    );
+    const live = (
+      await t.query<GatheringRow>(
+        `select * from gatherings
+          where circle_id = $1 and ended_at is null and expires_at > now()
+            and last_activity_at > now() - ($2 || ' minutes')::interval
+          order by created_at desc limit 1 for update`,
+        [circle.id, idle],
+      )
+    )[0];
+
+    let gatheringId: string;
+    let mainId: string;
+    let remainingSeconds: number;
+    let created = false;
+    let present: ParticipantRow[] = [];
+    if (live) {
+      gatheringId = live.id;
+      mainId = (await mainGroup(t, live.id)).id;
+      remainingSeconds = Math.max(60, Math.floor((new Date(live.expires_at).getTime() - Date.now()) / 1000));
+      present = await activeParticipants(t, live.id);
+      if (who.personId) {
+        const mine = present.find((p) => p.person_id === who.personId);
+        if (mine) {
+          await t.query("update participants set session_hash = $2, last_seen_at = now() where id = $1", [
+            mine.id,
+            sha256Hex(sessionSecret),
+          ]);
+          await audit(t, gatheringId, "participant_resumed", mine.id, null);
+          return { gatheringId, participantId: mine.id, mainId, remainingSeconds, others: [] as ParticipantRow[], stale };
+        }
+        const kicked = await t.query("select 1 from participants where gathering_id = $1 and person_id = $2 and kicked_at is not null", [
+          gatheringId,
+          who.personId,
+        ]);
+        if (kicked.length > 0) throw new ApiError(403, "kicked", "The host removed you from this gathering");
+      }
+      if (present.length >= live.max_humans) {
+        throw new ApiError(409, "gathering_full", `This table already has ${live.max_humans} people talking`);
+      }
+    } else {
+      // Nobody is talking at this table: start a fresh gathering; the first person in hosts it.
+      created = true;
+      const g = await insertGatheringTx(t, { title: circle.name, hostParticipantId: participantId, circleId: circle.id });
+      gatheringId = g.gatheringId;
+      mainId = g.mainId;
+      remainingSeconds = g.lifetimeSeconds;
+    }
+
+    await insertParticipantTx(t, {
+      id: participantId,
+      gatheringId,
+      displayName: who.displayName,
+      prefs: who.prefs,
+      role: created ? "host" : "guest",
+      color: pickColor(present.map((p) => p.color)),
+      sessionSecret,
+      mainId,
+      personId: who.personId,
+    });
+    if (created) {
+      await audit(t, gatheringId, "gathering_created", participantId, null, { table: true });
+    } else {
+      await bumpVersion(t, gatheringId);
+      await audit(t, gatheringId, "participant_joined", participantId, null, { table: true });
+    }
+    await t.query("update circles set last_used_at = now() where id = $1", [circle.id]);
+    return { gatheringId, participantId, mainId, remainingSeconds, others: present, stale };
+  });
+
+  // Quiet old sessions of this table: end them so their rooms are released.
+  for (const s of result.stale) {
+    if (s.id !== result.gatheringId) await bestEffort("end stale table gathering", () => endGatheringInternal(s.id, "idle", null));
+  }
+  if (result.others.length > 0) {
+    const main = (await db.query<GroupRow>("select * from groups where id = $1", [result.mainId]))[0];
+    const inMain = result.others.filter((p) => p.active_group_id === result.mainId).map((p) => p.id);
+    if (main) {
+      await bestEffort("nudge join", () => getMediaAdmin().sendData(main.livekit_room, inMain, { t: "refresh" }, "interp.control"));
+    }
+  }
+  const g = (await db.query<GatheringRow>("select * from gatherings where id = $1", [result.gatheringId]))[0];
+  return {
+    gatheringId: result.gatheringId,
+    participantId: result.participantId,
+    sessionSecret,
+    cookieMaxAgeSeconds: result.remainingSeconds,
+    inviteUrlPath: inviteUrlPath(result.gatheringId, await inviteTokenFor(db, g)),
+  };
+}
+
+/** Remove a person's seat from a table's live gathering (they were removed from the table). */
+export async function evictPersonFromTableGathering(tableId: string, personId: string): Promise<void> {
+  const db = await getDb();
+  const seats = await db.query<{ id: string; gathering_id: string }>(
+    `select p.id, p.gathering_id from participants p join gatherings g on g.id = p.gathering_id
+      where g.circle_id = $1 and g.ended_at is null and p.person_id = $2 and p.left_at is null and p.kicked_at is null`,
+    [tableId, personId],
+  );
+  for (const s of seats) {
+    await bestEffort("evict removed table member", () => removeParticipantFromGathering(s.gathering_id, s.id, null, "kicked"));
+  }
 }
 
 // --------------------------------------------------------------- budget
@@ -544,6 +754,30 @@ export async function getState(ctx: AuthContext): Promise<GatheringStateView> {
     [me.id],
   );
 
+  // Live session of a saved table: everyone in it may re-share the table's link.
+  let table: GatheringStateView["table"] = null;
+  if (g.circle_id) {
+    const c = (
+      await db.query<{ id: string; name: string; invite_version: number }>(
+        "select id, name, invite_version from circles where id = $1",
+        [g.circle_id],
+      )
+    )[0];
+    if (c) {
+      const role = me.person_id
+        ? (await db.query<{ role: string }>("select role from circle_members where circle_id = $1 and person_id = $2", [c.id, me.person_id]))[0]
+            ?.role
+        : undefined;
+      table = {
+        id: c.id,
+        name: c.name,
+        inviteUrlPath: tableInviteUrlPath(c.id, await tableInviteTokenFor(db, c)),
+        isMember: Boolean(role),
+        isOwner: role === "owner",
+      };
+    }
+  }
+
   return {
     version: Number(g.version),
     serverTime: new Date().toISOString(),
@@ -577,6 +811,7 @@ export async function getState(ctx: AuthContext): Promise<GatheringStateView> {
       toName: nameOf.get(o.to_participant_id) ?? "Someone",
     })),
     budget: await budgetFor(db, g),
+    table,
   };
 }
 
@@ -601,6 +836,15 @@ export async function updatePreferences(
   );
   await bumpVersion(db, ctx.gathering.id);
   const p = rows[0];
+  if (p.person_id) {
+    // Remembered people keep their latest languages for next time.
+    await db.query("update people set speak_lang = $2, listen_lang = $3, es_region = $4 where id = $1", [
+      p.person_id,
+      next.speak_lang,
+      next.listen_lang,
+      next.es_region,
+    ]);
+  }
   if (!p.active_group_id) return;
   const gr = await groupById(db, ctx.gathering.id, p.active_group_id);
   const admin = getMediaAdmin();
@@ -974,7 +1218,22 @@ export async function kickParticipant(ctx: AuthContext, participantId: string): 
 
 export async function leaveGathering(ctx: AuthContext): Promise<void> {
   if (ctx.me.role === "host") {
-    throw new ApiError(400, "host_must_end", "As host, end the gathering instead (or hand off by ending and recreating)");
+    if (!ctx.gathering.circle_id) {
+      throw new ApiError(400, "host_must_end", "As host, end the gathering instead (or hand off by ending and recreating)");
+    }
+    // Saved table: hosting passes to whoever has been here longest; the last one out ends the session.
+    const db = await getDb();
+    const next = (await activeParticipants(db, ctx.gathering.id)).find((p) => p.id !== ctx.me.id);
+    if (!next) {
+      await endGatheringInternal(ctx.gathering.id, "host_left", ctx.me.id);
+      return;
+    }
+    await db.tx(async (t) => {
+      await t.query("update participants set role = 'host' where id = $1", [next.id]);
+      await t.query("update participants set role = 'guest' where id = $1", [ctx.me.id]);
+      await t.query("update gatherings set host_participant_id = $2 where id = $1", [ctx.gathering.id, next.id]);
+      await audit(t, ctx.gathering.id, "host_handed_over", ctx.me.id, next.id);
+    });
   }
   await removeParticipantFromGathering(ctx.gathering.id, ctx.me.id, ctx.me.id, "left");
 }
@@ -982,7 +1241,7 @@ export async function leaveGathering(ctx: AuthContext): Promise<void> {
 async function removeParticipantFromGathering(
   gatheringId: string,
   participantId: string,
-  actorId: string,
+  actorId: string | null,
   how: "kicked" | "left",
 ): Promise<void> {
   const db = await getDb();
@@ -1276,6 +1535,11 @@ export async function cleanupExpiredGatherings(): Promise<number> {
   for (const r of rows) await endGatheringInternal(r.id, "cleanup", null);
   await db.query("delete from audit_events where created_at < now() - interval '30 days'");
   await db.query("delete from rate_limits where window_start < now() - interval '1 day'");
+  // Remembered phones and people unused for longer than a cookie can live are forgotten,
+  // and so are tables nobody belongs to any more.
+  await db.query("delete from person_devices where last_seen_at < now() - interval '400 days'");
+  await db.query("delete from people where last_seen_at < now() - interval '400 days'");
+  await db.query("delete from circles c where not exists (select 1 from circle_members m where m.circle_id = c.id)");
   return rows.length;
 }
 

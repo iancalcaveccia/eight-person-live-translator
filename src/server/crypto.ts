@@ -55,6 +55,17 @@ export function deriveInviteToken(appSecret: string, gatheringId: string, versio
     .slice(0, 32);
 }
 
+/**
+ * Invite token for a saved table. Same construction as gathering invites but a
+ * separate label, so a gathering token can never be replayed as a table token.
+ */
+export function deriveTableInviteToken(appSecret: string, tableId: string, version: number): string {
+  return createHmac("sha256", appSecret)
+    .update(`table-invite:v1:${tableId}:${version}`)
+    .digest("base64url")
+    .slice(0, 32);
+}
+
 // ---------------------------------------------------- internal API signatures
 
 export const SIGNATURE_HEADER = "x-interp-signature";

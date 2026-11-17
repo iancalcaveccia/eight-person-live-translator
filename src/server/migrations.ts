@@ -127,4 +127,58 @@ create table if not exists rate_limits (
 );
 `,
   },
+  {
+    id: "002_people_tables",
+    sql: `
+-- Remembered people ("keep me signed in on this phone"): a name, languages and
+-- the AI-consent version. No email, no password, no phone number. A device
+-- holds a random secret; only its SHA-256 is stored here.
+create table if not exists people (
+  id uuid primary key,
+  display_name text not null,
+  speak_lang text not null check (speak_lang in ('en','pl','es','auto')),
+  listen_lang text not null check (listen_lang in ('en','pl','es')),
+  es_region text not null default '' check (es_region in ('','es-AR','es-CO','es-ES')),
+  consent_version text not null,
+  consent_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+create table if not exists person_devices (
+  id uuid primary key,
+  person_id uuid not null references people(id) on delete cascade,
+  session_hash text not null unique,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+create index if not exists person_devices_person_idx on person_devices(person_id);
+
+-- Saved tables ("circles"): the people who talk together regularly. A table
+-- outlives its gatherings; each time someone taps it, the live gathering is
+-- reused or a fresh one is started.
+create table if not exists circles (
+  id uuid primary key,
+  name text not null,
+  invite_version int not null default 1,
+  created_by uuid,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz not null default now()
+);
+
+create table if not exists circle_members (
+  circle_id uuid not null references circles(id) on delete cascade,
+  person_id uuid not null references people(id) on delete cascade,
+  role text not null default 'member' check (role in ('owner','member')),
+  added_at timestamptz not null default now(),
+  primary key (circle_id, person_id)
+);
+create index if not exists circle_members_person_idx on circle_members(person_id);
+
+alter table gatherings add column if not exists circle_id uuid references circles(id) on delete set null;
+create index if not exists gatherings_circle_idx on gatherings(circle_id);
+alter table participants add column if not exists person_id uuid references people(id) on delete set null;
+create index if not exists participants_person_idx on participants(person_id);
+`,
+  },
 ];

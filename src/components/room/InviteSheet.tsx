@@ -7,13 +7,16 @@ import Sheet from "./Sheet";
 
 export default function InviteSheet({
   inviteUrlPath,
-  isHost,
+  tableName,
+  canRotate,
   seatsLeft,
   onRotate,
   onClose,
 }: {
   inviteUrlPath: string;
-  isHost: boolean;
+  /** Set for a saved table: the link stays valid for next time too. */
+  tableName: string | null;
+  canRotate: boolean;
   seatsLeft: number;
   onRotate: () => Promise<void>;
   onClose: () => void;
@@ -34,7 +37,11 @@ export default function InviteSheet({
   }, [url]);
 
   async function share() {
-    const data = { title: "Join our table on Mesa", text: "Live interpretation for our gathering", url };
+    const data = {
+      title: tableName ? `Join “${tableName}” on Mesa` : "Join our table on Mesa",
+      text: "Live interpretation: everyone speaks their own language",
+      url,
+    };
     if (navigator.share) {
       await navigator.share(data).catch(() => undefined);
     } else {
@@ -68,8 +75,12 @@ export default function InviteSheet({
             {copied ? "Copied" : "Copy link"}
           </button>
         </div>
-        <p className="small faint">Anyone with this link can join until the gathering is full. Treat it like a key.</p>
-        {isHost && (
+        <p className="small faint">
+          {tableName
+            ? "Send it once: whoever opens it is saved at this table and next time just taps it on Mesa's home screen. Treat it like a key."
+            : "Anyone with this link can join until the gathering is full. Treat it like a key."}
+        </p>
+        {canRotate && (
           <button
             className="btn btn-ghost btn-sm"
             disabled={rotating}
@@ -82,7 +93,11 @@ export default function InviteSheet({
               }
             }}
           >
-            {rotating ? "Making a new link…" : "Replace link (old link and QR stop working)"}
+            {rotating
+              ? "Making a new link…"
+              : tableName
+                ? "Replace link (old link stops working; saved people keep their place)"
+                : "Replace link (old link and QR stop working)"}
           </button>
         )}
       </div>

@@ -27,10 +27,18 @@ export const viewport: Viewport = {
   ],
 };
 
+/**
+ * Android/Chrome offer "install" once, early, through `beforeinstallprompt`.
+ * Keep that event until the home screen's install button is ready for it.
+ */
+const INSTALL_CAPTURE =
+  "window.addEventListener('beforeinstallprompt',function(e){e.preventDefault();window.__mesaInstall=e;window.dispatchEvent(new Event('mesa-install'));});";
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
       <body>
+        <script dangerouslySetInnerHTML={{ __html: INSTALL_CAPTURE }} />
         {children}
         <ServiceWorker />
       </body>

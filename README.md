@@ -22,12 +22,19 @@ a mobile UI and a provider abstraction (Gemini primary, OpenAI backup).
 > step) no longer get each other's voices translated, and the live screens
 > pass a two-phone walk-through ([docs/TEST_REPORT.md](docs/TEST_REPORT.md)).
 > One informal two-phone test (ES ↔ PL) found captions under the wrong name,
-> now fixed; the structured phone / Bluetooth plan is **not yet run**
-> ([docs/DEVICE_TEST_PLAN.md](docs/DEVICE_TEST_PLAN.md)).
+> now fixed; a second session ran 17 minutes without a reported problem. People
+> can be **remembered on their phone** and keep **saved tables** they rejoin
+> with one tap; Mesa installs on the home screen; **pocket mode** keeps the mic
+> on with a black screen (browsers stop a web page's mic when the screen turns
+> off); the room screen was rebuilt for phone sizes. The structured phone /
+> Bluetooth plan is **not yet run** ([docs/DEVICE_TEST_PLAN.md](docs/DEVICE_TEST_PLAN.md)).
 
 ## How it works (short)
 
 - **Gathering** = invite-only container (link/QR, host access code to create).
+- **Saved table** = the people who talk regularly. Open its link once (with
+  "Remember me on this phone"); afterwards tap it on Mesa's home screen. Each
+  tap joins the table's live gathering or starts a new one.
 - **Conversation group** = its own LiveKit room. You are in exactly one at a
   time; the server picks the room for your token, evicts you from the old room
   when you switch, and the worker re-checks every participant against Postgres.
@@ -100,7 +107,7 @@ Vercel and LiveKit without exposing values, deploys both halves and checks
 - Polish can only be produced by Gemini; OpenAI's translation model has no Polish output. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 - Spanish regional preference is shown and recorded but no live model can produce a specific regional accent yet.
 - Voices: the models adapt to each speaker's voice on their own; there is no voice picker and no cloning.
-- iPhone pauses the microphone when the screen locks; the app keeps the screen awake. See [docs/MOBILE.md](docs/MOBILE.md).
+- Phones stop a web page's microphone a few seconds after the screen turns off — installed on the home screen or not (Android and iPhone). Mesa keeps the screen awake and offers pocket mode (black, touch-locked screen); only a native app could do better. See [docs/MOBILE.md](docs/MOBILE.md).
 - Server-side group privacy cannot stop a microphone from physically hearing someone nearby.
 - Costs: see [docs/COSTS.md](docs/COSTS.md) (≈ $5–6 per hour for an active 8-person, 3-language table on Gemini; hard caps enforced).
 

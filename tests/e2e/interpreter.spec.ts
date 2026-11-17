@@ -74,12 +74,12 @@ async function participant(browser: Browser): Promise<{ ctx: BrowserContext; pag
 
 async function hostCreates(page: Page, name: string, speak: Lang) {
   await page.goto("/");
-  await page.getByRole("button", { name: "Start a gathering" }).click();
+  await page.getByRole("button", { name: "Start a table" }).click();
   await page.getByPlaceholder("Sunday dinner").fill("E2E dinner");
   await page.getByPlaceholder("Ian").fill(name);
   await page.getByPlaceholder("Set by the app owner").fill(HOST_CODE);
   await page.getByRole("group", { name: "Language I speak" }).getByRole("button", { name: speak }).click();
-  await page.getByRole("checkbox").check();
+  await page.getByRole("checkbox", { name: /I am an adult/ }).check();
   await page.getByRole("button", { name: "Create & get invite" }).click();
   await page.waitForURL(/\/g\/[0-9a-f-]{36}/);
   const link = (await page.locator(".link-box").textContent())!.trim();
@@ -94,7 +94,7 @@ async function guestJoins(page: Page, link: string, name: string, speak: Lang) {
   await page.getByRole("group", { name: "Language I speak" }).getByRole("button", { name: speak }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("checkbox").check();
+  await page.getByRole("checkbox", { name: /I am an adult/ }).check();
   await page.getByRole("button", { name: "Join the table" }).click();
   await page.waitForURL(/\/g\/[0-9a-f-]{36}$/);
 }

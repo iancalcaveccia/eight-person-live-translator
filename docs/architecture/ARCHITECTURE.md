@@ -41,6 +41,28 @@ flowchart LR
 - One translator job runs per group room (LiveKit agent dispatch embedded in
   every token), so translation streams, captions and tracks never cross rooms.
 
+## Remembered people and saved tables
+
+Gatherings stay short-lived (6 h max, ended after 30 min idle, then their
+names are deleted). On top of them, for people who choose "Remember me on
+this phone" (`src/server/people.ts`, migration `002_people_tables`):
+
+- **person** (`people`): name, languages, consent version. No email, phone or
+  password. A phone holds a 256-bit secret in an httpOnly cookie (`mesa_me`,
+  400 days, renewed on each home-screen visit); `person_devices` stores only its
+  SHA-256. "Forget me" deletes the person, every membership, and empty tables.
+- **saved table** (`circles` + `circle_members`): the people who talk together.
+  Joining needs the table link (`/t/<id>/join#k=…`, HMAC of id + version, a
+  different label from gathering invites). Members re-enter with one tap:
+  `POST /api/tables/<id>/enter` reuses the table's live gathering
+  (`gatherings.circle_id`) or starts a new one under a row lock, and takes back
+  the person's existing seat instead of adding a duplicate. The first person in
+  hosts that session; when a host leaves, hosting passes on.
+- **contacts**: only people you share a table with; only they can be added to a
+  new table without a link. Removing someone from a table ends their live seat
+  and replaces the link. Every authorization decision for media is still made
+  per gathering, as below.
+
 ## Trust boundaries
 
 | Data | Who can write it | Who trusts it |

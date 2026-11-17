@@ -11,11 +11,12 @@ import { hearingModeFor, type ListenerPrefs } from "@/client/media/routing";
 import { isIOS, ScreenWakeLock } from "@/client/media/devices";
 import { updateSettings, useSettings } from "@/client/prefs";
 import { flagFor } from "@/lib/languages";
-import { CaptionsIcon, ChevronDown, GroupsIcon, LockIcon, MicIcon, MicOffIcon, QrIcon, SettingsIcon } from "../icons";
+import { CaptionsIcon, ChevronDown, GroupsIcon, LockIcon, MicIcon, MicOffIcon, MoonIcon, QrIcon, SettingsIcon } from "../icons";
 import CaptionsPanel from "./CaptionsPanel";
 import ConversationsSheet, { type ConversationActions } from "./ConversationsSheet";
 import InviteSheet from "./InviteSheet";
 import PersonCard from "./PersonCard";
+import PocketMode from "./PocketMode";
 import SettingsSheet from "./SettingsSheet";
 import SpeakerSheet from "./SpeakerSheet";
 import { initials, speakerColor } from "./Sheet";
@@ -62,6 +63,9 @@ function RoomContent({
   const [now, setNow] = useState(() => Date.now());
   const wakeLock = useMemo(() => new ScreenWakeLock(), []);
   const [wakeHeld, setWakeHeld] = useState(false);
+  const [pocket, setPocket] = useState(false);
+  const [micPausedNotice, setMicPausedNotice] = useState(false);
+  const exitPocket = useCallback(() => setPocket(false), []);
 
   const hasState = state !== null;
   const listenLang = state?.me.listenLang ?? "en";
@@ -119,9 +123,12 @@ function RoomContent({
     }
   }, [session, snap, state]);
 
-  // Keep the screen awake while in the room (iOS stops the mic when locked).
+  // Keep the screen awake while in the room: phones stop a web page's
+  // microphone a few seconds after the screen turns off (Android and iPhone).
+  // Pocket mode always needs it.
+  const wantAwake = settings.keepAwake || pocket;
   useEffect(() => {
-    if (!settings.keepAwake) {
+    if (!wantAwake) {
       void wakeLock.disable().then(() => setWakeHeld(false));
       return;
     }
@@ -131,7 +138,46 @@ function RoomContent({
       clearInterval(t);
       void wakeLock.disable();
     };
-  }, [settings.keepAwake, wakeLock]);
+  }, [wantAwake, wakeLock]);
+
+  // Came back after the screen was off / another app was in front while the
+  // mic was on: say plainly that the phone paused it, and offer pocket mode.
+  useEffect(() => {
+    if (!session) return;
+    let hiddenAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt !== null && Date.now() - hiddenAt > 6_000 && session.getSnapshot().micWanted) setMicPausedNotice(true);
+      hiddenAt = null;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [session]);
+
+  // Name the session for the phone's media controls / lock screen.
+  const sessionTitle = state ? (state.table?.name ?? state.gathering.title) : null;
+  useEffect(() => {
+    if (!sessionTitle || typeof navigator === "undefined" || !("mediaSession" in navigator) || typeof MediaMetadata === "undefined") return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: sessionTitle,
+        artist: "Mesa · live interpretation",
+        artwork: [{ src: "/app-icon/512", sizes: "512x512", type: "image/png" }],
+      });
+    } catch {
+      /* unsupported */
+    }
+    return () => {
+      try {
+        navigator.mediaSession.metadata = null;
+      } catch {
+        /* unsupported */
+      }
+    };
+  }, [sessionTitle]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5_000);
@@ -254,27 +300,29 @@ function RoomContent({
       <header className="topbar">
         <button className="group-chip" onClick={() => setSheet("conversations")} aria-label="Conversations">
           {group?.kind === "private" ? <LockIcon width={16} height={16} /> : <GroupsIcon width={18} height={18} />}
-          <span className="name">{group?.name ?? "Conversation"}</span>
+          <span className="name">{group?.kind === "main" && state.table ? state.table.name : (group?.name ?? "Conversation")}</span>
           <span className="count">· {humans.length + 1}</span>
           {state.invitations.length > 0 && <span className="badge">{state.invitations.length}</span>}
           <ChevronDown width={16} height={16} />
         </button>
-        <span className="grow" />
-        <span
-          className={`pill ${status.tone === "live" ? "pill-live" : status.tone === "warn" ? "pill-warn" : status.tone === "err" ? "pill-err" : ""}`}
-          title={status.detail}
-          role="status"
-        >
-          <span className="dot" />
-          {status.label}
-        </span>
+        <button className="icon-btn pocket-btn" aria-label="Pocket mode" title="Pocket mode: black screen, mic stays on" onClick={() => setPocket(true)}>
+          <MoonIcon width={20} height={20} />
+        </button>
       </header>
 
       <div className="subbar small faint">
+        <span
+          className={`pill status-pill ${status.tone === "live" ? "pill-live" : status.tone === "warn" ? "pill-warn" : status.tone === "err" ? "pill-err" : ""}`}
+          title={status.detail ?? status.label}
+          role="status"
+        >
+          <span className="dot" />
+          <span className="pill-text">{status.label}</span>
+        </span>
         <span>
           {humans.length === 0
             ? "Nobody else here yet"
-            : `Talking with ${humans.map((h) => h.name).join(", ")}`}
+            : `With ${humans.map((h) => h.name).join(", ")}`}
         </span>
         <span>·</span>
         <span>{formatElapsed(elapsedMin)}</span>
@@ -302,9 +350,26 @@ function RoomContent({
               Translation is paused: the spending cap was reached. You can still talk and hear people in their own voices.
             </div>
           )}
-          {isIOS() && !iosHintDismissed && (
+          {micPausedNotice && (
+            <div className="notice notice-warn notice-actions">
+              <span>
+                While the screen was off, your phone paused the microphone. To keep talking with a dark screen, use
+                Pocket mode.
+              </span>
+              <span className="row">
+                <button className="btn btn-primary btn-sm" onClick={() => (setMicPausedNotice(false), setPocket(true))}>
+                  <MoonIcon width={16} height={16} /> Pocket mode
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setMicPausedNotice(false)}>
+                  OK
+                </button>
+              </span>
+            </div>
+          )}
+          {isIOS() && !iosHintDismissed && !micPausedNotice && (
             <button className="notice" onClick={() => setIosHintDismissed(true)}>
-              Keep Mesa open on screen — iPhone pauses the microphone when the screen locks or you switch apps.
+              iPhone pauses the microphone when the screen locks or you switch apps. Use Pocket mode (moon, top right)
+              to put the phone away with the mic on.
             </button>
           )}
           {snap.micPermission === "denied" && (
@@ -314,7 +379,7 @@ function RoomContent({
       </div>
 
       <main className="stage">
-        <section className="people" aria-label="People in this conversation">
+        <section className="people" aria-label="People in this conversation" data-size={humans.length + 1 > 4 ? "many" : "few"}>
           <div className="person me-card" style={{ ["--pc" as string]: speakerColor(state.me.color) }} data-active={snap.meSpeaking && snap.micLive}>
             <div className="avatar" style={{ ["--level" as string]: snap.meSpeaking && snap.micLive ? 0.6 : 0 }}>
               {initials(state.me.displayName)}
@@ -354,7 +419,7 @@ function RoomContent({
         )}
 
         {settings.captions && (
-          <section className="card card-tight" aria-label="Live captions">
+          <section className="card card-tight captions-card" aria-label="Live captions">
             <CaptionsPanel
               store={session.captions}
               names={names}
@@ -449,13 +514,20 @@ function RoomContent({
       {sheet === "conversations" && <ConversationsSheet state={state} busy={busy} actions={actions} onClose={() => setSheet(null)} />}
       {sheet === "invite" && (
         <InviteSheet
-          inviteUrlPath={state.gathering.inviteUrlPath}
-          isHost={state.me.role === "host"}
+          inviteUrlPath={state.table?.inviteUrlPath ?? state.gathering.inviteUrlPath}
+          tableName={state.table?.name ?? null}
+          canRotate={state.table ? state.table.isOwner : state.me.role === "host"}
           seatsLeft={seatsLeft}
-          onRotate={() => run(async () => void (await api.rotateInvite(gid)))}
+          onRotate={() =>
+            run(async () => {
+              if (state.table) await api.rotateTableLink(state.table.id);
+              else await api.rotateInvite(gid);
+            })
+          }
           onClose={() => setSheet(null)}
         />
       )}
+      {pocket && <PocketMode micOn={micOn && snap.micLive} peopleCount={humans.length} onExit={exitPocket} />}
       {sheet === "settings" && (
         <SettingsSheet
           state={state}
@@ -477,6 +549,10 @@ function RoomContent({
               router.push("/");
             })
           }
+          onPocket={() => {
+            setSheet(null);
+            setPocket(true);
+          }}
           onClose={() => setSheet(null)}
         />
       )}

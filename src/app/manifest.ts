@@ -2,11 +2,13 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
+    id: "/",
     name: "Mesa — live interpreter",
     short_name: "Mesa",
     description: "Live interpretation for the whole table in English, Polish and Spanish.",
     start_url: "/",
     scope: "/",
+    categories: ["social", "utilities"],
     display: "standalone",
     orientation: "portrait",
     background_color: "#0f0d0b",

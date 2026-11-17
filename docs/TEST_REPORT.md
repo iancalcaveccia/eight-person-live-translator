@@ -2,12 +2,14 @@
 
 ```text
 STATUS: DEPLOYED; REAL GEMINI TRANSLATION VERIFIED END-TO-END THROUGH THE LIVE APP
-        (synthetic participants) + ONE INFORMAL TWO-PHONE TEST BY THE OWNER (ES <-> PL)
+        (synthetic participants) + TWO INFORMAL TWO-PHONE SESSIONS BY THE OWNER (ES <-> PL)
 Milestones: M0–M5 implemented; tested locally (mock) and in production (real Gemini)
 Translation provider + model id: gemini-3.5-live-translate-preview (primary, configured);
             gpt-realtime-translate (backup, en/es only) — NOT configured, NOT exercised
-Real-device tests: ONE informal run 2026-11-17 (section 5c); the structured
-            plan in docs/DEVICE_TEST_PLAN.md is otherwise NOT PERFORMED
+Real-device tests: two informal sessions 2026-11-17 (sections 5c, 5d); the structured
+            plan in docs/DEVICE_TEST_PLAN.md is otherwise NOT PERFORMED.
+            Saved tables / home-screen install / pocket mode: tested in headless
+            Chrome at phone sizes only (section 5e) — NOT on real phones
 Live URL: https://eight-person-live-translator.vercel.app (verified 2026-11-17, section 6)
 ```
 
@@ -31,7 +33,8 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 
 | Suite | Command | Result |
 |---|---|---|
-| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **68 passed** (incl. caption retraction) |
+| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **87 passed** (incl. caption retraction; 19 for remembered people & saved tables) |
+| Phone-size screen tour (headless Chrome, Android UA, touch; 360×740 and 390×844) | `E2E_BASE_URL=… pnpm exec playwright test -c playwright.prod.config.ts screens` | **2 passed**, 41 screens, 0 sideways overflow (section 5e) |
 | Type-check | `pnpm typecheck` | PASS |
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
@@ -67,6 +70,19 @@ not vacuous.
 - Signed worker API: test vector shared with Python, bad/stale signatures
   rejected, unknown room 404, usage pricing, gathering cap and monthly cap stop
   translation, absurd values clamped.
+- Remembered people & saved tables (`tests/unit/people.test.ts`): device cookie is
+  httpOnly, 400 days, and only its SHA-256 is stored; a made-up cookie is nobody;
+  consent required; only members can enter a table (non-member = same 404 as
+  unknown table); a forged, old or *gathering* invite token is rejected as a table
+  token, identically to an unknown table; one-time guests are seated but saved
+  nowhere; contacts = only people you share a table with, and only they can be added
+  to a new table; owner removal ends the person's live seat, replaces the link and
+  the old link stops working; rotate/rename owner-only; leaving hands ownership on,
+  last one out deletes the table; a person the host kicked cannot tap back into that
+  session; seat cap enforced; re-entry takes back the same seat (no duplicates);
+  host can leave a table session (hosting passes on, last one out ends it); room
+  language changes are remembered; forgetting the only phone deletes the profile;
+  400-day cleanup.
 - Mixer policy: interjection ducks the monologue by 7 dB (never mutes),
   two-voice foreground with ≥ 3 talkers, focus/equal modes, smoothing,
   activity hysteresis. Routing: never native + translated for the same speaker,
@@ -214,7 +230,37 @@ seconds only, no text or audio):
 | Worker log | Polish speaker's session heard Spanish 28× (and Polish 39×); 51.5 s of re-voiced audio dropped by the same-language rule; the captions had already gone out |
 | Cause | the bleed guard only compared mic streams within ±120 ms; two phones deliver theirs with larger offsets → the partner's mic leak reached Gemini |
 | Fix | stream alignment + caption retraction, `270a7ee`, deployed 2026-11-17 17:07 UTC; reproduced and verified in the live simulator (5a, last three rows) |
-| Re-test on phones | **NOT YET RUN** |
+| Re-test on phones | second session the same evening — section 5d |
+
+### 5d. Second real session (owner + partner, 2026-11-17, 20:28–20:46 UTC)
+
+Same two phones, Spanish (Argentina) ↔ Polish, after the alignment fix. Worker
+log only (language labels and durations; no text, no audio). The owner reported
+the session finished and asked for a review; no specific problem was reported.
+
+| What | Result |
+|---|---|
+| Duration | ~17 min; both directions translated throughout; one Gemini stream rotation (20:41) without a gap |
+| Phone offset measured by the guard | **510–590 ms** (locks at +590, +570, +510 ms) — larger than the 250–400 ms simulated, close to the 600 ms search limit |
+| Partner's voice on the owner's (Spanish) mic | Gemini labelled Polish **58×** (also 'pt' 14×, 'en' 7×; those may be the owner's own speech) |
+| Owner's voice on the partner's (Polish) mic | Gemini labelled Spanish **37×** |
+| Bleed guard (loudness-pattern match) | flagged **0.0 s** on both mics. Likely reason: room reverb, browser noise suppression and the headsets' own processing reshape the far voice, so its loudness pattern no longer matches the near one (the simulator's synthetic leak does not model this) |
+| Same-language rule | dropped **95 s** (owner's mic) + **63 s** (partner's mic) of picked-up speech instead of re-voicing it; since `270a7ee` the captions of those stretches are retracted |
+| Consequence | For two people with two different languages the language rule covers the leak. A table with three languages needs a better leak signal than loudness (follow-up, `docs/architecture/WORKER.md`) |
+
+### 5e. Phone layout, saved tables, home-screen app, pocket mode (2026-11-17)
+
+`tests/e2e-prod/screens.spec.ts` drives two headless Chrome "phones" (Android
+user agent, touch, 2× pixels) through every screen at 360×740 and 390×844,
+screenshots each one and fails if anything sticks out sideways.
+
+| Check | Result |
+|---|---|
+| Before (production `270a7ee`) | room screen **wider than the phone** at both sizes: status pill, invite text and the Settings button cut off; people count wrapped onto two lines; an empty grid row pushed the people cards to the bottom |
+| After (local production build) | **2 passed**, 21 + 20 screens, **0 overflow**; cards at the top, captions fill the rest, all five dock buttons fit at 360 px; 5+ people switch to three smaller cards per row; status moved under the table name so neither is cut |
+| Saved table flow | start a table → its link → guest joins and is remembered → both go home → table shows who is there now → guest taps once → back in the same conversation; all test profiles deleted at the end |
+| Home-screen app | manifest + service worker were already present; added an install button (Android/Chrome) and iPhone instructions. **Installing on a real phone: NOT RUN** |
+| Microphone with the screen off | browsers stop a web page's microphone a few seconds after the screen turns off, installed or not (Chromium issue 374374232; galene issue 342, Oct 2026; Apple developer forums for iPhone). Pocket mode keeps the page in front with a black, touch-locked screen. **On a real phone: NOT RUN** |
 
 ## 6. Not run (needs your devices or reviewers)
 
@@ -224,6 +270,7 @@ seconds only, no text or audio):
 | Provider A/B (accuracy, accents, names/numbers, voice consistency) | bilingual reviewers + OpenAI key | `PROVIDER_COMPARE=true`, see `docs/PROVIDERS.md` |
 | Phone / Bluetooth / screen-lock / network-switch tests (beyond the one informal run in 5c) | needs the owner's phones | `docs/DEVICE_TEST_PLAN.md` |
 | 8 physical devices in one room, acoustic bleed | devices + people | same |
+| Saved table re-entry, home-screen install (Android + iPhone), pocket mode for 15 min, screen-off behaviour | needs the owner's phones | `docs/DEVICE_TEST_PLAN.md` rows 23–27 |
 | Krisp noise / voice-focus filter | requires LiveKit Cloud | toggle in Settings once deployed |
 
 ## 7. Deployment (verified 2026-11-17)

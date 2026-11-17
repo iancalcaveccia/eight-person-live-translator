@@ -1,4 +1,5 @@
 import { createGathering } from "@/server/gatherings";
+import { currentPerson } from "@/server/people";
 import { assertSameOrigin, clientIp, handle, json, readJson, serializeSessionCookie } from "@/server/http";
 import { cleanText, parseLanguagePrefs, requireConsent } from "@/server/validation";
 
@@ -19,6 +20,7 @@ export const POST = handle(async (req: Request) => {
       budgetUsd: typeof body.budgetUsd === "number" ? body.budgetUsd : undefined,
     },
     clientIp(req),
+    (await currentPerson(req))?.id ?? null,
   );
   return json(
     { gatheringId: result.gatheringId, participantId: result.participantId, inviteUrlPath: result.inviteUrlPath },

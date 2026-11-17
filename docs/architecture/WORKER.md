@@ -132,6 +132,8 @@ Guard now (speaker B, possible source A in the same room):
   label" rule was tried and removed — Gemini's labels for leaked audio are
   unstable (a speaker's own Polish was labelled 'en') and it dropped real
   translations.
+- **Web**: browser `autoGainControl` is off, so silence no longer pumps a
+  neighbour's leak up toward one's own level.
 
 First real two-phone test (2026-11-17, ES ↔ PL, two phones with Bluetooth
 headsets in one room): translations understandable, but each person's
@@ -142,8 +144,20 @@ offsets far beyond the original ±120 ms window (Bluetooth + capture
 pipelines); offline a 200 ms offset let ~90 % of a leak through, and the live
 simulator with a 250 ms offset reproduced it (22 s of a listener's own words
 played back, 2 ghost caption segments).
-- **Web**: browser `autoGainControl` is off, so silence no longer pumps a
-  neighbour's leak up toward one's own level.
+
+Second real session (2026-11-17 20:28–20:46 UTC, same phones, after the fix):
+the guard measured the phones **510–590 ms** apart (close to the 600 ms
+search limit) but flagged **0 s** of leak, while Gemini still heard the
+other person 58× / 37× on the two mics. The **same-language rule** did the
+work (95 s + 63 s dropped, captions retracted). Likely reason: on real
+phones the far voice passes through room reverb, the browser's noise
+suppression and the Bluetooth headset's own processing, so its loudness
+envelope no longer tracks the near copy; the synthetic leak in the simulator
+did not model that. With two people and two languages the language rule is
+enough. For a table with three languages, the next step is a leak signal that
+survives that processing — e.g. matching the *source-language transcripts*
+of two mics within the same few seconds — and widening `BLEED_MAX_OFFSET_MS`
+to ~1000 ms (re-run `scripts/bleed_bench.py` first).
 
 Results (synthetic voices, synthetic room; live = deployed app + real Gemini):
 

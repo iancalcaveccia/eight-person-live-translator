@@ -1,6 +1,6 @@
 "use client";
 
-import type { GatheringStateView, MediaTokenView } from "@/lib/api-types";
+import type { GatheringStateView, HomeView, MediaTokenView, PersonView, TablePreview } from "@/lib/api-types";
 import type { EsRegion, ListenLang, SpeakLang } from "@/lib/languages";
 
 export class ClientApiError extends Error {
@@ -83,6 +83,24 @@ export const api = {
   end: (gid: string) => post<{ ok: true }>(`${g(gid)}/end`),
   leaveGathering: (gid: string) => post<{ ok: true }>(`${g(gid)}/leave`),
   usage: (gid: string) => request<UsageReport>(`${g(gid)}/usage`),
+
+  // Remembered on this phone + saved tables.
+  home: () => request<HomeView>("/api/me"),
+  rememberMe: (body: JoinPrefs) => post<{ person: PersonView }>("/api/me", body),
+  editProfile: (patch: Partial<Omit<JoinPrefs, "consent">> & { consent?: true }) =>
+    request<{ person: PersonView }>("/api/me", { method: "PATCH", body: JSON.stringify(patch) }),
+  forgetMe: (everything: boolean) => request<{ ok: true }>("/api/me", { method: "DELETE", body: JSON.stringify({ everything }) }),
+  createTable: (name: string, memberIds: string[], hostCode?: string) =>
+    post<{ tableId: string; gatheringId: string }>("/api/tables", { name, memberIds, hostCode }),
+  enterTable: (tid: string) => post<{ gatheringId: string }>(`/api/tables/${tid}/enter`),
+  previewTable: (tid: string, inviteToken: string) => post<TablePreview>(`/api/tables/${tid}/preview`, { inviteToken }),
+  joinTable: (tid: string, body: { inviteToken: string; remember?: boolean } & Partial<JoinPrefs>) =>
+    post<{ gatheringId: string; remembered: boolean }>(`/api/tables/${tid}/join`, body),
+  renameTable: (tid: string, name: string) =>
+    request<{ ok: true }>(`/api/tables/${tid}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  rotateTableLink: (tid: string) => post<{ inviteUrlPath: string }>(`/api/tables/${tid}/invite/rotate`),
+  removeFromTable: (tid: string, personId: string) =>
+    request<{ ok: true; inviteUrlPath?: string }>(`/api/tables/${tid}/members/${personId}`, { method: "DELETE" }),
 };
 
 export interface UsageReport {

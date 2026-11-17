@@ -51,10 +51,21 @@ measured delays; use **Copy** of the numbers into this table.
 | 21 | Owner removes a member | Removed person is back in main, cannot hear the private group |
 | 22 | Two groups within earshot | Record acoustic bleed between groups (expected; not a software leak) |
 
+## M6 — saved tables, home-screen app, phone away
+
+| # | Test | Pass when |
+|---|---|---|
+| 23 | Saved table: A starts a table (Remember me on), B joins from its link (Remember me on); both close the browser; later both open Mesa and tap the table | Both are back in one conversation without forms or a new link; names and languages kept |
+| 24 | Install on Android: home screen → "Add to home screen" (or browser menu → Install app) | Mesa icon on the home screen; opens full screen, already remembered; WhatsApp table links open in it |
+| 25 | Install on iPhone: after joining in Safari, Share → Add to Home Screen | Opens full screen and remembered (iOS copies the sign-in cookie on install); a link pasted on the home screen opens the table |
+| 26 | Pocket mode 15 min: mic on, tap the moon, phone in pocket / face down | The other person hears you and you hear them for the whole 15 min; nothing reacts to pocket touches; hold the ring 1.5 s to unlock; note battery % used |
+| 27 | Screen off with the power button for 1 min while the mic is on | Expected (browser limit): the other person stops hearing you after a few seconds; Android may keep playing their voice to you; on return a banner offers Pocket mode and the mic works again without reloading |
+
 ## Results
 
 | Date | Test # | Devices / OS / browser / headset | Network | Result | Measured | Notes |
 |---|---|---|---|---|---|---|
 | 2026-11-17 | 1, 3, 4 (informal) | 2 phones + Bluetooth headsets (models not recorded) | home | PASS (owner's report) | — | ES ↔ PL, Spanish output understandable |
 | 2026-11-17 | 6b | same | home | **FAIL** | worker log: 51.5 s of leaked Spanish re-voiced and dropped | own words shown as captions under the other person's name; fixed in `270a7ee` (phone-offset alignment + caption retraction), **re-test pending** |
-| | all others | | | NOT RUN | | |
+| 2026-11-17 20:28 UTC | 1, 3, 4, 6b (informal, ~17 min) | same | home | translation ran throughout; no problem reported by the owner | phones 510–590 ms out of step; worker dropped 95 s + 63 s of picked-up speech (same-language rule); bleed guard 0 s | captions of dropped stretches are retracted since `270a7ee`; caption names not specifically checked |
+| | all others (incl. 23–27) | | | NOT RUN | | |
