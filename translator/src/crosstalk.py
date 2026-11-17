@@ -313,7 +313,21 @@ class CrossTalkDetector:
         # over that second, not 3 s of mostly silence (which made the overheard
         # voice look like the owner's own and lifted the hold at once).
         lv, ls = self._levels(identity, source, ts, window=1.0)
+        if not self._plausible(lv, ls):
+            # A stale (sticky) guard flag while nobody is talking (live run on
+            # the deployed worker: both mics at ~-68 dBFS). Acting on it set
+            # silence as the "overheard voice" level, so any real overheard
+            # voice then looked like the owner's own and the check went blind.
+            return
         self._hold(identity, source, "guard", 0, ts, lv, ls)
+
+    def _plausible(self, leak_db: float | None, source_db: float | None) -> bool:
+        """The overheard person is clearly louder on their own mic right now."""
+        return (
+            leak_db is not None
+            and source_db is not None
+            and source_db - leak_db >= self.level_margin_db
+        )
 
     def _foreign_script_chunk(self, identity: str, now: float) -> None:
         """No words to compare: if another mic is clearly louder right now (and
@@ -417,12 +431,14 @@ class CrossTalkDetector:
         started = now >= mic.hold_until
         mic.hold_until = now + self.hold_sec
         mic.hearing = source
-        if leak_db is not None:
+        if self._plausible(leak_db, source_db):
+            # Loudness references come only from moments when the overheard
+            # person is clearly louder; a decision taken in a pause keeps the
+            # previous ones.
             mic.leak_db = leak_db
-        if source_db is not None:
             mic.hear_db = source_db
             # "Still talking" for the source = within 10 dB of how loud they were.
-            self._mics[source].voice_ref_db = source_db - 10.0
+            self._mics[source].voice_ref_db = source_db - 10.0  # type: ignore[operator]
         if how == "language":
             mic.by_language += 1
         else:

@@ -127,6 +127,37 @@ def test_a_guard_hold_at_speech_onset_measures_the_last_second_only():
     assert d.is_held("ola") and not d.speaking_own("ola")
 
 
+def test_a_stale_guard_flag_in_silence_is_ignored_and_cannot_blind_the_check():
+    """Deployed worker, live 3-language run: the guard's sticky flag was handed
+    over while both mics were at ~-68 dBFS. Taking that as the overheard
+    level made every later overheard voice count as the owner's own."""
+    levels = {"ian": -68.6, "ola": -67.8}
+    d, clock, held = detector(levels=levels)
+    d.set_declared("ian", "es")
+    d.set_declared("ola", "pl")
+    d.note_guard_leak("ola", "ian", clock.t)
+    assert held == [] and not d.is_held("ola")
+    # Later Ian talks and Ola's mic overhears him: the check still works.
+    levels.update(ian=-15.0, ola=-36.0)
+    interleave(d, clock, "ian", "es", "ola", "es", ES_WORDS[:9])
+    assert d.is_held("ola")
+    frames(d, clock, 2.0, ian=-15.0, ola=-36.0)
+    assert d.is_held("ola") and not d.speaking_own("ola")
+
+
+def test_a_decision_taken_in_a_pause_keeps_the_earlier_loudness_references():
+    levels = {"ian": -15.0, "ola": -36.0}
+    d, clock, _held = detector(levels=levels)
+    d.set_declared("ian", "es")
+    d.set_declared("ola", "pl")
+    interleave(d, clock, "ian", "es", "ola", "es", ES_WORDS[:9])
+    levels.update(ian=-60.0, ola=-61.0)  # a pause when the next words land
+    interleave(d, clock, "ian", "es", "ola", "es", ES_WORDS[9:])
+    levels.update(ian=-15.0, ola=-36.0)
+    frames(d, clock, 1.0, ian=-15.0, ola=-36.0)
+    assert d.is_held("ola") and not d.speaking_own("ola")
+
+
 def test_the_loudness_guards_finding_starts_a_hold_and_frames_keep_it():
     d, clock, held = detector(levels={"ian": -15.0, "ola": -36.0})
     d.set_declared("ian", "es")
