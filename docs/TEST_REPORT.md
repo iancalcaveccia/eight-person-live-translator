@@ -179,6 +179,7 @@ table: well under $1.
 | LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `GqpnhWHh3KoE` (keepalive fix) deployed 2026-11-17 12:46 UTC |
 | Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
 | OpenAI key | not configured (optional backup) | — |
+| Open gathering creation (owner's choice, family use) | **On** since 2026-11-17: `OPEN_GATHERING_CREATION=1`, no host code needed to start a gathering; guests still need the invite link; $50/gathering and $200/month caps and the creation rate limit unchanged | live `/api/config` → `hostCodeRequired:false`; `/api/health` → `openCreation:true, commit e37cb35`; live `POST /api/gatherings` without a code → 201, then ended; live form shows no code field |
 | Earlier live checks (2026-10-30) | PASS | landing page 200 on a phone-sized viewport; security headers (HSTS, X-Frame-Options DENY, no-referrer, mic-only Permissions-Policy); uninvited `POST /api/gatherings/<id>/token` → **401** |
 
 Next: rows 1–6 of `docs/DEVICE_TEST_PLAN.md` on two real phones with
