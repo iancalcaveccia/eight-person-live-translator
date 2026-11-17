@@ -1,18 +1,20 @@
 # Test report
 
 ```text
-STATUS: CODE WORKS LOCALLY (mock translator, local LiveKit) — PARTIAL overall
-Milestones: M0 done; M1–M5 implemented and tested locally with a mock provider;
-            real-provider, real-phone and deployment items blocked on credentials/devices
-Translation provider + model id: gemini-3.5-live-translate-preview (primary),
-            gpt-realtime-translate (backup, en/es targets only); NOT exercised with real keys
-Real-device tests: NOT PERFORMED
-Live URL: see "Deployment" below
+STATUS: DEPLOYED; REAL GEMINI TRANSLATION VERIFIED END-TO-END THROUGH THE LIVE APP
+        (synthetic participants) — phone/Bluetooth tests NOT PERFORMED
+Milestones: M0–M5 implemented; tested locally (mock) and in production (real Gemini)
+Translation provider + model id: gemini-3.5-live-translate-preview (primary, configured);
+            gpt-realtime-translate (backup, en/es only) — NOT configured, NOT exercised
+Real-device tests: NOT PERFORMED (needs two phones; docs/DEVICE_TEST_PLAN.md)
+Live URL: https://eight-person-live-translator.vercel.app (verified 2026-11-17, section 6)
 ```
 
 Environment: Windows 11, 14 logical CPUs, 15.5 GB RAM; Node 25.9, pnpm
-10.18.0, Python 3.13.18 (uv 0.13.6); livekit-server 1.13.10 (`--dev`, local);
-Chrome 156 (headless, fake microphone from WAV files). Date: 2026-10-30.
+10.18.0, Python 3.13.18 (uv 0.13.6; worker suite re-run on 3.12.10 on
+2026-11-17 after uv's managed Python was removed from the machine);
+livekit-server 1.13.10 (`--dev`, local); Chrome 156 (headless, fake
+microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 
 ## 1. Baseline (M0) — upstream before changes
 
@@ -33,7 +35,7 @@ Chrome 156 (headless, fake microphone from WAV files). Date: 2026-10-30.
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **98 passed**, 2 skipped (integration) |
+| Worker unit tests | `cd translator && uv run pytest` | **100 passed**, 2 skipped (integration) — incl. 2 keepalive tests added 2026-11-17 |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -110,28 +112,74 @@ joins within 25 s instead of "Starting…" forever.
 Not covered by E2E: real Gemini/OpenAI, phones, Bluetooth, mobile networks,
 iOS Safari (headless Chrome only), Krisp filters (need LiveKit Cloud).
 
-## 5. Not run (needs your keys or devices)
+## 5. Real Gemini through the deployed app (2026-11-17)
+
+`translator/scripts/latency_probe.py --app-url https://eight-person-live-translator.vercel.app`
+behaves like two phones: it creates a gathering with the host code, joins a
+second participant through the invite link, gets both media tokens **from the
+production API**, publishes a WAV clip as the speaker's microphone in real
+time and listens to the translated track. So the real control plane, Neon
+Postgres, admission check, LiveKit Cloud (eu-central) and the deployed worker
+with real Gemini are all in the path. The gathering is ended afterwards (data
+deleted). Raw results: `docs/results/2026-11-17-*.json`.
+
+"First audio" = speaker's speech onset → first audible translated speech at the
+listener (> −45 dBFS), on the same clock. Repetitions the overloaded test
+laptop could not publish in real time (wall time > 1.1 × audio time) are
+excluded from p50/p95 and marked in the JSON.
+
+| Pair (source clip) | Reps used | First audio p50 / p95 | Began before speaker finished | Translated speech heard before speaker finished | Catch-up after speaker stopped |
+|---|---|---|---|---|---|
+| en → es (33 s, Windows TTS) | 1 of 3 | 4.20 s (excluded reps: 3.56, 5.25 s) | yes, all | 23 s of 25 s speech (used rep) | 4.7 s (used rep) |
+| en → pl (33 s) **+ en "What? Seriously?" at 8 s → es** | 3 of 3 | 3.66 s / 3.85 s; interjection 3.78 s / 4.16 s | yes, all; interjection heard while main speech still running, all | 23–24 s of 25 s speech | 3.6–3.7 s |
+| es → pl (50 s, Gemini's own Spanish output) | 2 of 2 | 3.30 s / 3.31 s | yes, all | ~28 s of 30 s speech | 3.0–3.2 s |
+| pl → en (34 s, Gemini's own Polish output) | 2 of 2 | 3.70 s / 4.04 s | yes, all | 23–24 s of 27 s speech | 2.8–2.9 s |
+| es → en (50 s, Gemini's own Spanish output) | 2 of 2 | 3.20 s / 3.27 s | yes, all | ~27 s of 30 s speech | 2.4–2.8 s |
+
+Reading: a listener hears the translation **about 3.2–4.2 s after the speaker
+starts** (p50 per pair), it keeps flowing while they talk (release gate 2:
+streaming, not end-of-turn), and it finishes about 3 s after they stop. Most
+of that is the model: the worker's own onset → first Gemini audio figures for
+the main speech were 1.9–3.8 s (the JSON also holds a few sub-second values
+from the other participant's session, which the probe does not label). An
+interjection is translated independently while the long speech continues
+(release gate 3).
+
+Found and fixed with the real service: Gemini closes a stream after exactly
+**120 s without input** ("1008 Session closed due to client inactivity").
+Because the worker withholds silence to save cost, every quiet participant's
+stream was dropping and reopening every two minutes (seen in the first run as
+`reconnecting` states). Measured directly: a 100 ms silent chunk every 25 s
+kept a stream open past 240 s. The worker now sends one after 30 s without
+input (`STREAM_KEEPALIVE_SEC`); after redeploying, no run showed a reconnect.
+
+Limits of these numbers: synthetic voices (English from Windows TTS; Spanish
+and Polish sources are Gemini's own synthesized output, which is clean
+studio-like speech), one desktop on home internet as both "phones", no
+Bluetooth (adds its own buffering), no accuracy or voice-similarity scoring.
+Estimated provider cost of all testing on 2026-11-17, from the worker's price
+table: well under $1.
+
+## 6. Not run (needs your devices or reviewers)
 
 | Item | Why not | How to run |
 |---|---|---|
-| Real Gemini / OpenAI translation, real first-audio latency p50/p95 per language pair | no API keys in this environment | `translator/scripts/latency_probe.py` after `configure-cloud.ps1` |
-| Provider A/B (accuracy, accents, names/numbers, voice consistency) | keys + bilingual reviewers | `PROVIDER_COMPARE=true`, see `docs/PROVIDERS.md` |
+| OpenAI backup provider | no `OPENAI_API_KEY` configured (optional) | add it to `translator/.env.local`, re-run `configure-cloud.ps1` |
+| Provider A/B (accuracy, accents, names/numbers, voice consistency) | bilingual reviewers + OpenAI key | `PROVIDER_COMPARE=true`, see `docs/PROVIDERS.md` |
 | Every phone / Bluetooth / screen-lock / network-switch test | no phones attached | `docs/DEVICE_TEST_PLAN.md` |
 | 8 physical devices in one room, acoustic bleed | devices + people | same |
 | Krisp noise / voice-focus filter | requires LiveKit Cloud | toggle in Settings once deployed |
 
-## 6. Deployment (verified 2026-10-30)
+## 7. Deployment (verified 2026-11-17)
 
 | Piece | State | Evidence |
 |---|---|---|
-| Vercel project `consultorios/eight-person-live-translator` (GitHub-connected, production branch `main`) | **Deployed, not yet functional** | https://eight-person-live-translator.vercel.app serves commit `fab9d19` (Vercel promoted the project's first deployment, built from this PR's branch, to production); functions in `fra1` |
-| Live checks against that URL | PASS for what exists | landing page 200 on a phone-sized viewport; security headers present (HSTS, X-Frame-Options DENY, no-referrer, mic-only Permissions-Policy); uninvited `POST /api/gatherings/<id>/token` → **401** |
-| `/api/health` | 503 by design | `database:false, livekit:false, internalApi:false, hostCode:false` — no secrets configured yet; creating a gathering is refused until `HOST_ACCESS_CODE` exists |
-| Postgres | **Not provisioned** | needs your approval of a Neon (or other) database in the Vercel project |
-| LiveKit Cloud worker | **Not deployed** | the LiveKit CLI is not linked to your account (`lk cloud auth` needs your browser approval) |
-| Gemini / OpenAI keys | **Not configured** | must be created by you; they are never handled by the assistant |
+| Web app on Vercel `consultorios/eight-person-live-translator` | **Deployed and functional** | https://eight-person-live-translator.vercel.app, `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"commit":"64c86b9"}`; `/api/config` → `mediaConfigured:true, maxHumans:8, defaultProvider:gemini, perGatheringCapUsd:50`; functions in `fra1` |
+| Postgres | **Neon, eu-central-1**, connected via the Vercel integration | health `database:true`; gatherings created/joined/ended by the probe |
+| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `GqpnhWHh3KoE` (keepalive fix) deployed 2026-11-17 12:46 UTC |
+| Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
+| OpenAI key | not configured (optional backup) | — |
+| Earlier live checks (2026-10-30) | PASS | landing page 200 on a phone-sized viewport; security headers (HSTS, X-Frame-Options DENY, no-referrer, mic-only Permissions-Policy); uninvited `POST /api/gatherings/<id>/token` → **401** |
 
-Once `scripts/configure-cloud.ps1` has run, re-check `/api/health` (all `true`),
-then run rows 1–6 of `docs/DEVICE_TEST_PLAN.md` on two phones and
-`translator/scripts/latency_probe.py` with real Spanish/Polish/English clips to
-fill in real-provider p50/p95.
+Next: rows 1–6 of `docs/DEVICE_TEST_PLAN.md` on two real phones with
+Bluetooth headsets. Those are the only release gates still unverified.

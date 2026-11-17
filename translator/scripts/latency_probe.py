@@ -19,10 +19,21 @@ interruption-onset -> first audible translation for the original speaker.
 
 Which worker it talks to
 ------------------------
-Tokens are minted directly with LIVEKIT_API_KEY/SECRET and dispatch the
-agent named by --agent-name. The production worker admits only participants
-known to the control plane, so point the probe at a worker started in
-standalone mode, e.g. (PowerShell):
+With --app-url (production path): the probe behaves like two phones. It
+creates a gathering on the deployed web app with the host access code (read
+from --host-code-file, never printed), joins a second participant through the
+invite link, fetches both media tokens from the app and connects with them, so
+the real control plane, admission check and deployed worker are exercised. The
+gathering is ended at the end, which deletes its data.
+
+    uv run python scripts/latency_probe.py --app-url https://<app>.vercel.app \
+        --speaker-wav ../tests/e2e/fixtures/monologue_30s.wav \
+        --speaker-lang en --listener-lang es --repeat 3
+
+Without --app-url, tokens are minted directly with LIVEKIT_API_KEY/SECRET and
+dispatch the agent named by --agent-name. The production worker admits only
+participants known to the control plane, so point the probe at a worker
+started in standalone mode, e.g. (PowerShell):
 
     $env:TRANSLATOR_AGENT_NAME="interp-probe"; $env:CONTROL_PLANE_URL=""
     uv run python src/agent.py start          # GEMINI_API_KEY etc. in .env.local
@@ -44,12 +55,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import http.cookiejar
 import json
 import os
 import platform
 import statistics
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 import wave
 from dataclasses import dataclass, field
@@ -61,6 +75,7 @@ from livekit import api, rtc
 
 RATE = 48000
 FRAME = RATE // 100  # 10 ms
+REALTIME_TOLERANCE = 1.1  # publish wall time / audio time above this = host overloaded
 
 
 def load_wav_48k_mono(path: Path) -> np.ndarray:
@@ -142,6 +157,44 @@ def token(
         )
         .to_jwt()
     )
+
+
+class AppClient:
+    """One participant of the deployed web app (its own cookie session)."""
+
+    def __init__(self, base: str) -> None:
+        self.base = base.rstrip("/")
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
+
+    def call(self, method: str, path: str, body: dict | None = None) -> dict:
+        req = urllib.request.Request(
+            self.base + path,
+            data=json.dumps(body).encode() if body is not None else b"",
+            method=method,
+            headers={
+                "content-type": "application/json",
+                "user-agent": "mesa-latency-probe",
+            },
+        )
+        try:
+            with self.opener.open(req, timeout=30) as r:
+                text = r.read().decode()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            raise SystemExit(f"{method} {path} -> HTTP {e.code}: {detail}") from None
+        return json.loads(text) if text else {}
+
+
+def app_prefs(name: str, speak: str, listen: str, region: str) -> dict:
+    return {
+        "displayName": name,
+        "speakLang": speak,
+        "listenLang": listen,
+        "esRegion": region if listen == "es" else "",
+        "consent": True,
+    }
 
 
 @dataclass
@@ -228,17 +281,8 @@ async def wait_track(peer: Peer, name: str, timeout: float) -> None:
 
 async def run(args: argparse.Namespace) -> dict:
     load_dotenv(Path(__file__).resolve().parents[1] / ".env.local")
-    url = args.url or os.environ.get("LIVEKIT_URL", "")
-    key = os.environ.get("LIVEKIT_API_KEY", "")
-    secret = os.environ.get("LIVEKIT_API_SECRET", "")
-    if not (url and key and secret):
-        raise SystemExit(
-            "LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required"
-        )
-
     clip = load_wav_48k_mono(Path(args.speaker_wav))
     gap = np.zeros(int(args.gap * RATE), np.int16)
-    room = args.room or f"probe_{uuid.uuid4().hex[:10]}"
     speaker = Peer(
         "probe-speaker",
         args.speaker_lang,
@@ -251,12 +295,60 @@ async def run(args: argparse.Namespace) -> dict:
         args.listener_lang,
         record=bool(args.record_dir),
     )
-    tx_main = f"tx:{speaker.identity}:{args.listener_lang}"
-    tx_inter = f"tx:{listener.identity}:{speaker.listen}"
 
-    await speaker.join(
-        url,
-        token(
+    end_app = None
+    if args.app_url:
+        host_code = Path(args.host_code_file).read_text(encoding="utf-8-sig").strip()
+        host, guest = AppClient(args.app_url), AppClient(args.app_url)
+        created = host.call(
+            "POST",
+            "/api/gatherings",
+            {
+                "title": "Latency probe",
+                "hostCode": host_code,
+                **app_prefs(
+                    "Probe speaker", speaker.speak, speaker.listen, args.es_region
+                ),
+            },
+        )
+        gid = created["gatheringId"]
+
+        def end_app() -> None:
+            host.call("POST", f"/api/gatherings/{gid}/end")
+
+        try:
+            joined = guest.call(
+                "POST",
+                f"/api/gatherings/{gid}/join",
+                {
+                    "inviteToken": created["inviteUrlPath"].split("#k=", 1)[1],
+                    **app_prefs(
+                        "Probe listener",
+                        listener.speak,
+                        listener.listen,
+                        args.es_region,
+                    ),
+                },
+            )
+            s_media = host.call("POST", f"/api/gatherings/{gid}/token")
+            l_media = guest.call("POST", f"/api/gatherings/{gid}/token")
+        except BaseException:
+            end_app()
+            raise
+        speaker.identity = created["participantId"]
+        listener.identity = joined["participantId"]
+        url, room = s_media["serverUrl"], s_media["room"]
+        s_tok, l_tok = s_media["token"], l_media["token"]
+    else:
+        url = args.url or os.environ.get("LIVEKIT_URL", "")
+        key = os.environ.get("LIVEKIT_API_KEY", "")
+        secret = os.environ.get("LIVEKIT_API_SECRET", "")
+        if not (url and key and secret):
+            raise SystemExit(
+                "LIVEKIT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required"
+            )
+        room = args.room or f"probe_{uuid.uuid4().hex[:10]}"
+        s_tok = token(
             key,
             secret,
             room,
@@ -264,11 +356,8 @@ async def run(args: argparse.Namespace) -> dict:
             speaker.speak,
             speaker.listen,
             args.agent_name,
-        ),
-    )
-    await listener.join(
-        url,
-        token(
+        )
+        l_tok = token(
             key,
             secret,
             room,
@@ -276,8 +365,33 @@ async def run(args: argparse.Namespace) -> dict:
             listener.speak,
             listener.listen,
             args.agent_name,
-        ),
-    )
+        )
+
+    try:
+        return await measure(
+            args, url, room, speaker, listener, s_tok, l_tok, clip, gap
+        )
+    finally:
+        if end_app is not None:
+            end_app()
+
+
+async def measure(
+    args: argparse.Namespace,
+    url: str,
+    room: str,
+    speaker: Peer,
+    listener: Peer,
+    s_tok: str,
+    l_tok: str,
+    clip: np.ndarray,
+    gap: np.ndarray,
+) -> dict:
+    tx_main = f"tx:{speaker.identity}:{args.listener_lang}"
+    tx_inter = f"tx:{listener.identity}:{speaker.listen}"
+
+    await speaker.join(url, s_tok)
+    await listener.join(url, l_tok)
     await wait_track(listener, tx_main, args.dispatch_timeout)
 
     inter_clip = (
@@ -309,8 +423,13 @@ async def run(args: argparse.Namespace) -> dict:
         rx = listener.rx.get(tx_main, [])
         t_on, t_end, _ = speech_bounds(rx, s_on, s_end + args.tail + args.gap, thr)
         heard_before_end = speech_bounds(rx, s_on, s_end, thr)[2]
+        # An overloaded probe host publishes slower than real time, which
+        # stretches the timeline; such repetitions are excluded from p50/p95.
+        publish_ratio = (src[-1][0] - src[0][0]) / max(len(src) * FRAME / RATE, 1e-3)
         rep = {
             "rep": r + 1,
+            "published_in_real_time": publish_ratio <= REALTIME_TOLERANCE,
+            "publish_time_ratio": round(publish_ratio, 2),
             "source_speech_s": round(s_end - s_on, 2),
             "first_translated_audio_s": round(t_on - s_on, 3) if t_on else None,
             "began_before_source_end": bool(t_on and t_on < s_end),
@@ -339,24 +458,34 @@ async def run(args: argparse.Namespace) -> dict:
         e["latencyMs"] for e in listener.events if e.get("t") == "first_audio"
     ]
     states = [e.get("state") for e in listener.events if e.get("t") == "session"]
+    valid = [r for r in reps if r["published_in_real_time"]]
     firsts = [
         r["first_translated_audio_s"]
-        for r in reps
+        for r in valid
         if r["first_translated_audio_s"] is not None
     ]
     inters = [
         r.get("interjection_to_first_audio_s")
-        for r in reps
+        for r in valid
         if r.get("interjection_to_first_audio_s") is not None
     ]
     summary = {
         "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "room": room,
         "livekit_url_host": url.split("//")[-1].split("/")[0],
-        "agent_name": args.agent_name,
+        "mode": "deployed app (real control plane + deployed worker)"
+        if args.app_url
+        else "direct tokens",
+        "app_host": args.app_url.split("//")[-1].split("/")[0]
+        if args.app_url
+        else None,
+        "agent_name": "gemini-translator (deployed)"
+        if args.app_url
+        else args.agent_name,
         "pair": f"{args.speaker_lang}->{args.listener_lang}",
         "clip": Path(args.speaker_wav).name,
         "repetitions": len(reps),
+        "repetitions_published_in_real_time": len(valid),
         "first_audio_p50_s": round(pct(firsts, 50), 3) if firsts else None,
         "first_audio_p95_s": round(pct(firsts, 95), 3) if firsts else None,
         "first_audio_mean_s": round(statistics.mean(firsts), 3) if firsts else None,
@@ -419,6 +548,19 @@ def main() -> None:
     p.add_argument(
         "--agent-name",
         default=os.environ.get("TRANSLATOR_AGENT_NAME", "gemini-translator"),
+    )
+    p.add_argument(
+        "--app-url",
+        help="deployed web app; probe joins like two phones (production path)",
+    )
+    p.add_argument(
+        "--host-code-file",
+        default=str(
+            Path(__file__).resolve().parents[2] / ".secrets" / "host-access-code.txt"
+        ),
+    )
+    p.add_argument(
+        "--es-region", default="es-AR", choices=["", "es-AR", "es-CO", "es-ES"]
     )
     p.add_argument("--url")
     p.add_argument("--room")

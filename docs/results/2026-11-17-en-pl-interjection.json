@@ -1,0 +1,75 @@
+{
+  "date_utc": "2026-11-17T12:52:47Z",
+  "room": "grp_zsg4q66obozl7q6nq64oon5a",
+  "livekit_url_host": "translator-5tgch5b0.livekit.cloud",
+  "mode": "deployed app (real control plane + deployed worker)",
+  "app_host": "eight-person-live-translator.vercel.app",
+  "agent_name": "gemini-translator (deployed)",
+  "pair": "en->pl",
+  "clip": "monologue_30s.wav",
+  "repetitions": 3,
+  "repetitions_published_in_real_time": 3,
+  "first_audio_p50_s": 3.656,
+  "first_audio_p95_s": 3.853,
+  "first_audio_mean_s": 3.698,
+  "began_before_source_end_all": true,
+  "interjection_p50_s": 3.781,
+  "interjection_p95_s": 4.161,
+  "worker_first_audio_ms": [
+    379,
+    1877,
+    331,
+    1973,
+    564,
+    2208
+  ],
+  "worker_session_states": [
+    "connecting",
+    "connecting",
+    "live",
+    "live"
+  ],
+  "host": "Windows-11-10.0.26300-SP0",
+  "reps": [
+    {
+      "rep": 1,
+      "published_in_real_time": true,
+      "publish_time_ratio": 1.0,
+      "source_speech_s": 32.97,
+      "first_translated_audio_s": 3.563,
+      "began_before_source_end": true,
+      "translated_speech_heard_before_source_end_s": 24.01,
+      "source_speech_frames_s": 25.02,
+      "end_catch_up_s": 3.703,
+      "interjection_to_first_audio_s": 3.485,
+      "interjection_heard_before_main_ended": true
+    },
+    {
+      "rep": 2,
+      "published_in_real_time": true,
+      "publish_time_ratio": 1.0,
+      "source_speech_s": 32.97,
+      "first_translated_audio_s": 3.656,
+      "began_before_source_end": true,
+      "translated_speech_heard_before_source_end_s": 23.81,
+      "source_speech_frames_s": 25.02,
+      "end_catch_up_s": 3.593,
+      "interjection_to_first_audio_s": 3.781,
+      "interjection_heard_before_main_ended": true
+    },
+    {
+      "rep": 3,
+      "published_in_real_time": true,
+      "publish_time_ratio": 1.01,
+      "source_speech_s": 33.25,
+      "first_translated_audio_s": 3.875,
+      "began_before_source_end": true,
+      "translated_speech_heard_before_source_end_s": 23.19,
+      "source_speech_frames_s": 25.02,
+      "end_catch_up_s": 3.609,
+      "interjection_to_first_audio_s": 4.203,
+      "interjection_heard_before_main_ended": true
+    }
+  ],
+  "note": "Synthetic participants on this host; not a phone/Bluetooth measurement."
+}

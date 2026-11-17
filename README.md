@@ -12,13 +12,14 @@ Built on the MIT-licensed [livekit-examples/gemini-live-translate](https://githu
 gatherings, breakout groups, a listener-side interruption mixer, cost controls,
 a mobile UI and a provider abstraction (Gemini primary, OpenAI backup).
 
-> **Status (2026-10-30):** all automated tests pass locally, including real
-> Chrome + LiveKit + worker end-to-end runs with a mock translator (see
-> [docs/TEST_REPORT.md](docs/TEST_REPORT.md)). The web app is deployed at
-> https://eight-person-live-translator.vercel.app but is **not functional
-> until the database, LiveKit and Gemini credentials are configured**
-> ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)). Real-provider latency and every
-> real-phone / Bluetooth test are **not yet run**.
+> **Status (2026-11-17):** deployed and working at
+> https://eight-person-live-translator.vercel.app with real Gemini
+> translation (Neon Postgres, LiveKit Cloud worker in Frankfurt). Measured
+> through the live app with synthetic voices: listeners hear the translation
+> about 3.2–4.2 s after a speaker starts, it streams while they talk, and
+> interjections are translated alongside a long speech
+> ([docs/TEST_REPORT.md](docs/TEST_REPORT.md)). Every real-phone / Bluetooth
+> test is **not yet run** ([docs/DEVICE_TEST_PLAN.md](docs/DEVICE_TEST_PLAN.md)).
 
 ## How it works (short)
 
