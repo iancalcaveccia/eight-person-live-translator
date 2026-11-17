@@ -1534,6 +1534,7 @@ export async function cleanupExpiredGatherings(): Promise<number> {
   );
   for (const r of rows) await endGatheringInternal(r.id, "cleanup", null);
   await db.query("delete from audit_events where created_at < now() - interval '30 days'");
+  await db.query("delete from worker_events where created_at < now() - interval '30 days'");
   await db.query("delete from rate_limits where window_start < now() - interval '1 day'");
   // Remembered phones and people unused for longer than a cookie can live are forgotten,
   // and so are tables nobody belongs to any more.

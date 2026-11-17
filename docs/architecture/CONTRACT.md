@@ -254,6 +254,29 @@ When `translation.allowed` is `false` (`reason`: `gathering_cap`,
 session within 2 s, publishes `{"t":"budget","state":"exceeded"}` and starts
 no new sessions until a later response allows it.
 
+### 6.3 `POST /api/internal/events` (diagnostics, content-free)
+
+Sent with each usage report (≤ 300 events per call; the worker keeps at most
+500 if the API is down). Kinds: `worker_started`, `session_started`,
+`session_closed`, `minute`, `rotation`, `stream_error`, `crosstalk_hold`,
+`crosstalk_lift`, `crosstalk_summary`.
+
+```json
+{"room":"grp_...","events":[{"ts":1795000000.1,"kind":"minute","speaker":"<uuid>","target":"pl",
+  "data":{"age_min":12.0,"output_s":31.5,"first_audio_p50_ms":3120,"heard":{"es":11,"pl":2},
+          "same_language_dropped_s":0,"crosstalk_dropped_s":4.2,"withheld_s":6.1,"rotations":0}}]}
+```
+
+The server keeps only numbers, booleans, `{label: number}` maps and short
+labels without spaces (no free text can be stored), in `worker_events` for
+30 days. Response `{"stored": n}`.
+
+### 6.4 `POST /api/internal/diagnostics` (read back, signed the same way)
+
+Body `{"since"?: ISO, "until"?: ISO, "room"?: "grp_..."}` (default: last
+24 h) → `{"events":[…], "usage":[…]}`. Used by
+`translator/scripts/diag_report.py` to review long sessions.
+
 ## 7. Cost model (server side, configurable)
 
 Estimated USD per record:
@@ -286,6 +309,8 @@ Worker (`translator/.env.local`, LiveKit Cloud secrets):
 | `INPUT_GATE` | no | `true` |
 | `BLEED_GUARD` | no | `true` |
 | `CROSSTALK_GUARD` | no | `true` (same words on two mics; see WORKER.md) |
+| `STREAM_REFRESH_SEC` | no | `300` (fresh provider stream at a pause; 0 = only when the provider asks) |
+| `GEMINI_VAD_START` / `GEMINI_VAD_END` / `GEMINI_VAD_SILENCE_MS` / `GEMINI_VAD_PREFIX_MS` | no | unset (Gemini speech-detection tuning; only after a local test) |
 
 Control plane (`.env.local`, Vercel env): `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
 `LIVEKIT_API_SECRET`, `DATABASE_URL`, `INTERNAL_API_SECRET`, `HOST_ACCESS_CODE`,

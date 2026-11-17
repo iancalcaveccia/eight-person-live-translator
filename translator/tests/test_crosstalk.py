@@ -421,6 +421,34 @@ def test_the_memory_of_whom_a_mic_overheard_fades():
     assert not d.is_held("ola")  # needs fresh evidence (shared words) first
 
 
+def test_while_held_the_overheard_voice_is_kept_from_the_provider_but_the_owner_is_not():
+    """Owner's 30-min session: fine at first, confused later. The provider's
+    memory filled up with the neighbour's voice; now it never hears it."""
+    d, clock, _held = _held_by_language()
+    assert d.withhold("ola", -36.0)  # the overheard copy
+    assert not d.withhold("ola", -14.0)  # her own voice goes through at once
+    d2, _clock2, _ = detector()
+    assert not d2.withhold("ola", -36.0)  # nobody held: nothing withheld
+    frames(d, clock, 6.0, ian=-60.0, ola=-55.0)  # Ian stopped long ago
+    assert not d.withhold("ola", -36.0)
+
+
+def test_holds_and_lifts_are_reported_as_numbers_only():
+    seen: list[tuple[str, str, dict]] = []
+    d, clock, _held = _held_by_language()
+    d.on_event = lambda kind, who, data: seen.append((kind, who, data))
+    frames(d, clock, 0.3, ian=-15.0, ola=-14.0)  # Ola speaks up: lift
+    d.forget("ola")
+    kinds = [k for k, _, _ in seen]
+    assert kinds == ["crosstalk_lift", "crosstalk_summary"]
+    assert seen[0][2] == {"why": "own_voice"}
+    assert all(
+        isinstance(v, (int, float, str, bool))
+        for _, _, data in seen
+        for v in data.values()
+    )
+
+
 def test_the_mute_lasts_while_the_overheard_person_keeps_talking():
     """Even when the provider mis-transcribes the far copy (no shared words)."""
     d, clock, _held = _held_by_language()

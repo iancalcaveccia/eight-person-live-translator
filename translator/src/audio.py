@@ -791,6 +791,7 @@ class SpeakerInput:
         self.speech_active = False
         self.frames_read = 0
         self.bleed_frames = 0
+        self.withheld_frames = 0  # kept from the provider: overheard voice (crosstalk)
         self.levels = LevelHistory()
 
     def start(self) -> None:
@@ -838,9 +839,14 @@ class SpeakerInput:
         samples = np.frombuffer(pcm, dtype=np.int16)
         level = energy_dbfs(samples)
         self.levels.add(now, level)
+        withheld = False
         if self._crosstalk is not None:
             try:
                 self._crosstalk.note_level(self.identity, level, now)
+                # Overheard voice on a held mic: don't let the provider hear it
+                # (its memory stays one voice, one language); the owner's own,
+                # clearly louder voice still goes through.
+                withheld = self._crosstalk.withhold(self.identity, level)
             except Exception:  # never let the side check break capture
                 logger.debug("crosstalk level update failed", exc_info=True)
         try:
@@ -855,8 +861,11 @@ class SpeakerInput:
                     bleed = self._guard.is_bleed(self.identity, now)
                 except Exception:
                     bleed = False
-        speech = vad_speech and not bleed
-        if bleed:
+        if withheld:
+            self.withheld_frames += 1
+        speech = vad_speech and not bleed and not withheld
+        bleed = bleed or withheld
+        if bleed and not withheld:
             self.bleed_frames += 1
             if self._crosstalk is not None and self._guard is not None:
                 # Hand the guard's finding to the words check: it keeps the

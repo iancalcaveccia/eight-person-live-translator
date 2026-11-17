@@ -35,6 +35,11 @@ export default function PrivacyPage() {
               <strong>Forget me</strong>, or after 400 days without using Mesa.
             </li>
             <li>Anonymous usage numbers (minutes of interpreted audio, estimated cost, delay measurements) are kept for spending limits.</li>
+            <li>
+              Anonymous quality numbers, for 30 days, to find and fix problems: per minute, how long translations took,
+              which language the interpreter thought it heard (counts only), reconnections, and how often a microphone
+              was muted for picking up someone else. Never names, words or audio.
+            </li>
             <li>Security logs without names or content (e.g. &ldquo;someone tried to join with an invalid link&rdquo;) for 30 days.</li>
           </ul>
         </section>

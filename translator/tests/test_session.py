@@ -350,6 +350,71 @@ async def test_own_words_cut_the_tail_short():
     await inp.aclose()
 
 
+async def test_stream_memory_is_refreshed_at_a_pause_without_a_gap():
+    """Owner's 30-min session got confused after the first quarter hour: give
+    the provider a fresh stream every few minutes, but only when quiet."""
+    events: list[tuple] = []
+    inp = make_input(silence(6.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        settings=fast(stream_refresh_sec=0.5),
+        diag=lambda kind, spk, tgt, **data: events.append((kind, data)),
+    )
+    inp.start()
+    assert await wait_for(lambda: session.rotations >= 1, timeout=5)
+    assert session.state == "live"
+    kinds = [k for k, _ in events]
+    assert kinds[0] == "session_started"
+    assert ("rotation", "refresh") in [(k, d.get("why")) for k, d in events]
+    await session.aclose()
+    await inp.aclose()
+    assert [k for k, _ in events][-1] == "session_closed"
+
+
+async def test_no_refresh_while_the_speaker_is_talking():
+    inp = make_input(silence(4.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, settings=fast(stream_refresh_sec=0.2)
+    )
+    inp.speech_active = True  # mid-sentence the whole time
+    session._maybe_refresh(time.monotonic() + 10)
+    await asyncio.sleep(0.2)
+    assert session.rotations == 0
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_minute_stats_report_numbers_only():
+    events: list[tuple] = []
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        diag=lambda kind, spk, tgt, **data: events.append((kind, spk, tgt, data)),
+        speak_lang="es",
+    )
+    await session._on_transcript(
+        TranscriptOut(kind="input", text="hola que tal", lang="es")
+    )
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    session._minute_stats(time.monotonic())
+    kind, spk, tgt, data = events[-1]
+    assert (kind, spk, tgt) == ("minute", "spk", "pl")
+    assert data["heard"] == {"es": 1} and data["output_s"] > 0
+    assert events[0][3]["speak_lang"] == "es"
+    flat = [v for v in data.values() if not isinstance(v, dict)]
+    assert all(isinstance(v, (int, float, str, bool)) for v in flat)
+    assert "hola" not in repr(events)
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_echo_sessions_keep_same_language_output():
     """'I switch languages' speakers use echo sessions on purpose."""
     inp = make_input(silence(3.0))

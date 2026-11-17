@@ -168,6 +168,12 @@ class Settings:
     # silence, so send one silent chunk after this many seconds without input.
     # 0 disables. ~0.3 % of a quiet speaker's time is sent (and billed).
     stream_keepalive_sec: float = 30.0
+    # Give each provider stream a fresh memory this often, at a pause, by
+    # opening the next stream before closing the old one (no gap). Owner's
+    # 30-min session 2026-11-17: fine at first, "confused, saying odd things"
+    # later; a stream otherwise keeps everything it heard until the provider
+    # cuts it (~10 min), possibly mid-sentence. 0 disables.
+    stream_refresh_sec: float = 300.0
     provider_failures_before_fallback: int = 3
     connect_timeout_sec: float = 10.0
     rotation_drain_sec: float = 3.0
@@ -240,6 +246,7 @@ def load_settings() -> Settings:
         backlog_hard_ms=_env_int("BACKLOG_HARD_MS", 6000),
         session_grace_sec=_env_float("SESSION_GRACE_SEC", 10.0),
         stream_keepalive_sec=_env_float("STREAM_KEEPALIVE_SEC", 30.0),
+        stream_refresh_sec=_env_float("STREAM_REFRESH_SEC", 300.0),
         idle_shutdown_sec=_env_float("IDLE_SHUTDOWN_SEC", 30.0),
         admission_fail_closed_sec=_env_float("ADMISSION_FAIL_CLOSED_SEC", 30.0),
         usage_interval_sec=_env_float("USAGE_INTERVAL_SEC", 15.0),

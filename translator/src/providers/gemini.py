@@ -83,7 +83,12 @@ _REJECT_HINTS = (
 
 
 def build_setup_payload(
-    *, model: str, target_lang: str, echo_target: bool, layout: str
+    *,
+    model: str,
+    target_lang: str,
+    echo_target: bool,
+    layout: str,
+    activity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     generation_config: dict[str, Any] = {
         "responseModalities": ["AUDIO"],
@@ -92,10 +97,14 @@ def build_setup_payload(
             "echoTargetLanguage": echo_target,
         },
     }
+    # Optional speech-detection tuning (GEMINI_VAD_* env); off by default and
+    # only to be enabled after a local real-Gemini run shows it is accepted
+    # and actually lowers the delay.
+    detection: dict[str, Any] = {"disabled": False, **(activity or {})}
     setup: dict[str, Any] = {
         "model": f"models/{model}",
         "generationConfig": generation_config,
-        "realtimeInputConfig": {"automaticActivityDetection": {"disabled": False}},
+        "realtimeInputConfig": {"automaticActivityDetection": detection},
     }
     if layout == LAYOUT_GENERATION_CONFIG:
         generation_config["inputAudioTranscription"] = {}
@@ -270,11 +279,13 @@ class GeminiProvider(TranslationProvider):
         connect_timeout_sec: float = 10.0,
         connector: Connector | None = None,
         layout_state: _LayoutState | None = None,
+        activity: dict[str, Any] | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required for the gemini provider")
         self._api_key = api_key
         self._model = model
+        self._activity = activity or None
         self._url = url
         self._timeout = connect_timeout_sec
         self._connector = connector or websockets.connect
@@ -325,6 +336,7 @@ class GeminiProvider(TranslationProvider):
             target_lang=target_lang,
             echo_target=echo_target,
             layout=layout,
+            activity=self._activity,
         )
         try:
             ws = await asyncio.wait_for(

@@ -179,9 +179,12 @@ class CrossTalkDetector:
         resume_sec: float = 8.0,
         level_fn: LevelFn | None = None,
         on_hold: HoldFn | None = None,
+        on_event: Callable[[str, str, dict], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.enabled = enabled
+        # (kind, identity, numbers/labels) -> content-free diagnostics store.
+        self.on_event = on_event
         self.window_sec = window_sec
         self.min_words = min_words
         self.min_share = min_share
@@ -205,9 +208,47 @@ class CrossTalkDetector:
     def set_declared(self, identity: str, speak_lang: str) -> None:
         self._mics.setdefault(identity, _Mic()).declared = speak_lang
 
+    def _event(self, kind: str, identity: str, **data: object) -> None:
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(kind, identity, data)
+        except Exception:  # pragma: no cover - diagnostics are best effort
+            logger.debug("crosstalk event failed", exc_info=True)
+
+    def withhold(self, identity: str, level_db: float) -> bool:
+        """Should this mic frame be kept from the provider? While a mic is held
+        as overhearing someone, only its owner's own (clearly louder) voice
+        goes through: the provider's memory then holds one voice and one
+        language instead of filling up with the neighbour's (owner's 30-min
+        session: fine at first, confused later)."""
+        mic = self._mics.get(identity)
+        if mic is None or not self.enabled or self._clock() >= mic.hold_until:
+            return False
+        if mic.leak_db is None:
+            return True
+        return level_db < self._own_threshold(mic)
+
+    def _own_threshold(self, mic: _Mic) -> float:
+        assert mic.leak_db is not None
+        threshold = mic.leak_db + self.own_margin_db
+        if mic.hear_db is not None:
+            threshold = max(threshold, mic.hear_db - self.own_margin_db)
+        return threshold
+
     def forget(self, identity: str) -> None:
         mic = self._mics.pop(identity, None)
         if mic is not None and (mic.holds or mic.undecided):
+            self._event(
+                "crosstalk_summary",
+                identity,
+                holds=mic.holds,
+                by_language=mic.by_language,
+                by_loudness=mic.by_level,
+                lifted_by_voice=mic.lifted_by_voice,
+                resumes=mic.resumes,
+                undecided=mic.undecided,
+            )
             logger.info(
                 "crosstalk %s: muted %d times as another person's voice "
                 "(by language %d, by loudness %d), own voice lifted it %d times, "
@@ -456,6 +497,15 @@ class CrossTalkDetector:
             _db(leak_db),
             _db(source_db),
         )
+        self._event(
+            "crosstalk_hold",
+            leak,
+            source=source,
+            how=how,
+            words=words,
+            leak_db=leak_db if leak_db is not None else -999.0,
+            source_db=source_db if source_db is not None else -999.0,
+        )
         if self.on_hold is not None:
             try:
                 self.on_hold(leak)
@@ -483,10 +533,7 @@ class CrossTalkDetector:
         # Their own voice: clearly above the overheard copy, and about as loud as
         # a near voice (the overheard person on their own mic), so someone
         # leaning closer does not count as the owner talking.
-        own_threshold = mic.leak_db + self.own_margin_db
-        if mic.hear_db is not None:
-            own_threshold = max(own_threshold, mic.hear_db - self.own_margin_db)
-        loud = level_db >= own_threshold
+        loud = level_db >= self._own_threshold(mic)
         if loud:
             mic.own_score = min(mic.own_score + 1.0, 30.0)
         else:
@@ -540,6 +587,7 @@ class CrossTalkDetector:
         self._remember(mic, max(self._clock(), mic.own_until))
         mic.hold_until = 0.0
         logger.info("crosstalk %s: %s again, translations back on", identity[:8], why)
+        self._event("crosstalk_lift", identity, why=why.replace(" ", "_"))
 
     def _own_words(self, identity: str, mic: _Mic, now: float) -> None:
         if self._fits(identity, now) is False:

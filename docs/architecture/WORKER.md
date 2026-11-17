@@ -229,6 +229,37 @@ close to the mouth, people about 1 m apart; "Hold to talk" removes the
 problem entirely for someone who wants it. Krisp BVC (background voice
 cancellation) is a paid LiveKit Cloud feature beyond 100 min/month.
 
+## Long sessions: clean input, fresh memory, stored diagnostics
+
+The owner's ~30-minute two-phone session (2026-11-17) "started very well,
+then got confused and said odd things from the middle on". Each provider
+stream keeps everything it heard as context until the provider closes the
+connection (~10 min, possibly mid-sentence); a mic overhearing the other
+person fills that context with a second voice and language (the 17-minute
+session's log: Polish heard 58× on the Spanish speaker's mic).
+
+- **Clean input** (`CrossTalkDetector.withhold`): while a mic is held as
+  overhearing someone, its frames below the owner's-own-voice threshold are
+  not sent to the provider at all (the input gate closes on them); the
+  owner's clearly louder voice still goes through at once. Counted per minute
+  as `withheld_s`.
+- **Fresh memory** (`STREAM_REFRESH_SEC`, default 300): every 5 min, at a
+  pause (speaker quiet, nothing being voiced or queued), the session opens a
+  new stream before closing the old one — no gap. A stream older than that
+  in a non-stop monologue still rotates when the provider asks (GoAway).
+- **Stored diagnostics** (`/api/internal/events` → `worker_events`, 30 days,
+  numbers and labels only): stream open/close with totals, one `minute`
+  event per stream (delay p50, the provider's language labels — a speaker's
+  own stream labelled in other languages means confusion — drops, backlog,
+  rotations, reconnects, withheld seconds), rotations with reason and age,
+  stream errors (code only), overheard-mic holds and lifts. Read back with
+  `uv run python scripts/diag_report.py --hours 6` (signed with the worker's
+  secret). Survives redeploys, unlike `lk agent logs`.
+- **Long-session test**: `table_sim.py --repeat N --keep-captions` plays the
+  same exchange N times in one room and scores each repeat's translation
+  against the first (content-word F1): a model drifting over time shows as
+  falling similarity.
+
 ## Backlog control
 
 `BacklogController` bounds accumulated delay of translated audio:

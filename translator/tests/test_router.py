@@ -156,6 +156,38 @@ async def test_crosstalk_is_fed_once_per_speaker_and_mutes_all_their_streams():
     await h.close()
 
 
+async def test_diagnostics_reach_the_control_plane_with_the_usage_reports():
+    cp = FakeControlPlane()
+    h = Harness([human("a", "es", "es"), human("b", "pl", "pl")], control_plane=cp)
+    h.router.start()
+    assert await wait_for(lambda: len(h.router.sessions) == 2, timeout=5)
+    assert await wait_for(lambda: any(c["events"] for c in cp.event_calls), timeout=5)
+    kinds = [e["kind"] for c in cp.event_calls for e in c["events"]]
+    assert "worker_started" in kinds and kinds.count("session_started") == 2
+    await h.close()
+    kinds = [e["kind"] for c in cp.event_calls for e in c["events"]]
+    assert kinds.count("session_closed") == 2
+    started = [
+        e for c in cp.event_calls for e in c["events"] if e["kind"] == "session_started"
+    ]
+    assert {(e["speaker"], e["data"]["speak_lang"]) for e in started} == {
+        ("a", "es"),
+        ("b", "pl"),
+    }
+
+
+async def test_diagnostics_never_pile_up_when_the_control_plane_is_down():
+    cp = FakeControlPlane()
+    cp.fail = True
+    h = Harness([human("a", "es", "es")], control_plane=cp)
+    for i in range(800):
+        h.router._diag("minute", "a", "pl", n=i)
+    assert len(h.router._diag_events) == 500
+    await h.router._flush_diag()
+    assert len(h.router._diag_events) == 500
+    await h.close()
+
+
 async def test_admission_denial_evicts_and_excludes_from_demand():
     cp = FakeControlPlane()
     cp.denied["intruder"] = "not_in_group"

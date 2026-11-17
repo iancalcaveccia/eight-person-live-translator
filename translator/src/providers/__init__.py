@@ -3,11 +3,33 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from config import Settings
 from providers.base import TranslationProvider
 
 logger = logging.getLogger("translator.providers")
+
+
+def gemini_activity_from_env() -> dict[str, object] | None:
+    """Gemini speech-detection tuning, only when explicitly configured:
+    GEMINI_VAD_START (START_SENSITIVITY_HIGH|LOW), GEMINI_VAD_END
+    (END_SENSITIVITY_HIGH|LOW), GEMINI_VAD_SILENCE_MS, GEMINI_VAD_PREFIX_MS."""
+    out: dict[str, object] = {}
+    start = os.environ.get("GEMINI_VAD_START", "").strip()
+    end = os.environ.get("GEMINI_VAD_END", "").strip()
+    if start in ("START_SENSITIVITY_HIGH", "START_SENSITIVITY_LOW"):
+        out["startOfSpeechSensitivity"] = start
+    if end in ("END_SENSITIVITY_HIGH", "END_SENSITIVITY_LOW"):
+        out["endOfSpeechSensitivity"] = end
+    for env, key in (
+        ("GEMINI_VAD_SILENCE_MS", "silenceDurationMs"),
+        ("GEMINI_VAD_PREFIX_MS", "prefixPaddingMs"),
+    ):
+        raw = os.environ.get(env, "").strip()
+        if raw.isdigit():
+            out[key] = int(raw)
+    return out or None
 
 
 def build_providers(settings: Settings) -> dict[str, TranslationProvider]:
@@ -30,6 +52,7 @@ def build_providers(settings: Settings) -> dict[str, TranslationProvider]:
             model=settings.gemini_model,
             chunk_ms=settings.gemini_chunk_ms,
             connect_timeout_sec=settings.connect_timeout_sec,
+            activity=gemini_activity_from_env(),
         )
 
     if settings.openai_api_key:

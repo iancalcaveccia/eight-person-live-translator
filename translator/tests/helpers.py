@@ -240,6 +240,7 @@ class FakeControlPlane:
         self.room_unknown = False
         self.admission_calls: list[list[str]] = []
         self.usage_calls: list[dict] = []
+        self.event_calls: list[dict] = []
 
     async def admission(self, *, room: str, identities: list[str]) -> AdmissionResult:
         self.admission_calls.append(list(identities))
@@ -276,6 +277,12 @@ class FakeControlPlane:
             translation=self.usage_translation,
             spend={"gatheringUsd": 0.0, "capGatheringUsd": 50},
         )
+
+    async def events(self, *, room: str, events: list[dict]) -> int:
+        self.event_calls.append({"room": room, "events": events})
+        if self.fail:
+            raise ControlPlaneError("down")
+        return len(events)
 
     async def aclose(self) -> None:
         return None

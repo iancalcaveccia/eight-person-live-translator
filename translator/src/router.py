@@ -305,6 +305,8 @@ class TranslationRouter:
         self._standalone_spend = 0.0
         self._last_human_seen = clock()
         self.shutdown_reason: str | None = None
+        self._diag_events: list[dict[str, Any]] = []
+        self._declared: dict[str, str] = {}
 
         self.bleed_guard = BleedGuard(
             enabled=settings.bleed_guard,
@@ -332,6 +334,7 @@ class TranslationRouter:
             level_margin_db=settings.crosstalk_level_margin_db,
             level_fn=self._mic_loudness,
             on_hold=self._on_crosstalk_hold,
+            on_event=lambda kind, who, data: self._diag(kind, who, None, **data),
             clock=clock,
         )
         self.admission = AdmissionManager(
@@ -400,6 +403,15 @@ class TranslationRouter:
                     self._speaker_tracks[p.identity] = pub.track
 
         self.admission.start()
+        s = self._settings
+        self._diag(
+            "worker_started",
+            bleed_guard=s.bleed_guard,
+            crosstalk_guard=s.crosstalk_guard,
+            stream_refresh_sec=s.stream_refresh_sec,
+            input_gate=s.input_gate,
+            provider=s.translation_provider,
+        )
         self._tasks = [
             asyncio.create_task(self._usage_loop(), name="usage"),
             asyncio.create_task(self._stats_loop(), name="stats"),
@@ -526,6 +538,7 @@ class TranslationRouter:
             self._sync_inputs(humans)
             for h in humans:
                 self.crosstalk.set_declared(h.identity, h.speak_lang)
+                self._declared[h.identity] = h.speak_lang
             desired_pairs = compute_demand(humans) if self.translation_allowed else {}
             desired = {
                 SessionKey(self.gathering_id, self.group_id, s, t): echo
@@ -579,6 +592,8 @@ class TranslationRouter:
                     room_io=self._io,
                     settings=self._settings,
                     crosstalk=self.crosstalk,
+                    diag=self._diag,
+                    speak_lang=self._declared.get(key.speaker, ""),
                     resampler_factory=self._resampler_factory,
                 )
                 self.sessions[key] = session
@@ -764,12 +779,47 @@ class TranslationRouter:
             self._spawn(self._close_all_sessions(policy.reason or "budget"))
             self._spawn(self._publish_status())
 
+    # --- diagnostics (content-free, kept 30 days by the control plane) ----------
+
+    def _diag(
+        self,
+        kind: str,
+        speaker: str | None = None,
+        target: str | None = None,
+        **data: Any,
+    ) -> None:
+        if len(self._diag_events) >= 500:
+            self._diag_events.pop(0)  # never grow without bound if the API is down
+        self._diag_events.append(
+            {
+                "ts": time.time(),
+                "kind": kind,
+                "speaker": speaker,
+                "target": target,
+                "data": data,
+            }
+        )
+
+    async def _flush_diag(self) -> None:
+        if not self._diag_events:
+            return
+        if self._cp.standalone:
+            self._diag_events.clear()
+            return
+        batch, self._diag_events = self._diag_events[:300], self._diag_events[300:]
+        try:
+            await self._cp.events(room=getattr(self._room, "name", ""), events=batch)
+        except Exception as exc:  # diagnostics must never disturb the audio
+            logger.debug("diagnostics upload failed: %s", exc)
+            self._diag_events = (batch + self._diag_events)[-500:]
+
     async def _report_usage(self, *, final: bool = False) -> None:
         records = list(self._pending_records)
         for s in [*self.sessions.values(), *self.compare_sessions.values()]:
             records.extend(s.take_usage_records())
         self._pending_records = []
         if not records:
+            await self._flush_diag()
             return
         if self._cp.standalone:
             self._standalone_spend += sum(
@@ -789,6 +839,8 @@ class TranslationRouter:
             logger.warning("usage report failed: %s", exc)
             self._pending_records = (records + self._pending_records)[-200:]
             return
+        finally:
+            await self._flush_diag()
         spend = result.spend or {}
         cap = spend.get("capGatheringUsd")
         used = spend.get("gatheringUsd")

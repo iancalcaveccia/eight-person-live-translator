@@ -214,3 +214,10 @@ class ControlPlaneClient:
             },
         )
         return parse_usage(data)
+
+    async def events(self, *, room: str, events: list[dict[str, Any]]) -> int:
+        """Content-free diagnostics (numbers and machine labels only)."""
+        data = await self._post(
+            "/api/internal/events", {"room": room, "events": events}
+        )
+        return int(data.get("stored", 0))

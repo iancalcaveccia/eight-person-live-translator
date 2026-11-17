@@ -181,4 +181,28 @@ alter table participants add column if not exists person_id uuid references peop
 create index if not exists participants_person_idx on participants(person_id);
 `,
   },
+  {
+    id: "003_worker_events",
+    sql: `
+-- Content-free interpreter diagnostics (no names, no words, no audio): which
+-- streams opened and closed, per-minute delay and language-label counts,
+-- reconnections, overheard-mic holds. Kept 30 days so long sessions can be
+-- reviewed and tuned after the worker has been redeployed. "room" is the
+-- random media-room name, kept so a session stays groupable after its
+-- gathering (and its ids) are deleted.
+create table if not exists worker_events (
+  id bigserial primary key,
+  created_at timestamptz not null default now(),
+  room text,
+  gathering_id uuid,
+  group_id uuid,
+  kind text not null,
+  speaker_id uuid,
+  target_lang text,
+  data jsonb not null default '{}'::jsonb
+);
+create index if not exists worker_events_created_idx on worker_events(created_at);
+create index if not exists worker_events_room_idx on worker_events(room, created_at);
+`,
+  },
 ];

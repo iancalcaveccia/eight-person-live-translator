@@ -352,3 +352,44 @@ async def test_session_reconnects_after_abrupt_close():
         assert "reconnecting" in states
         await session.aclose()
         await inp.aclose()
+
+
+def test_speech_detection_tuning_is_off_unless_configured(monkeypatch):
+    from providers import gemini_activity_from_env
+    from providers.gemini import LAYOUT_SETUP, build_setup_payload
+
+    for name in (
+        "GEMINI_VAD_START",
+        "GEMINI_VAD_END",
+        "GEMINI_VAD_SILENCE_MS",
+        "GEMINI_VAD_PREFIX_MS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert gemini_activity_from_env() is None
+    plain = build_setup_payload(
+        model="m", target_lang="pl", echo_target=False, layout=LAYOUT_SETUP
+    )
+    assert plain["setup"]["realtimeInputConfig"] == {
+        "automaticActivityDetection": {"disabled": False}
+    }
+
+    monkeypatch.setenv("GEMINI_VAD_START", "START_SENSITIVITY_HIGH")
+    monkeypatch.setenv("GEMINI_VAD_SILENCE_MS", "300")
+    monkeypatch.setenv("GEMINI_VAD_END", "not-a-value")
+    activity = gemini_activity_from_env()
+    assert activity == {
+        "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+        "silenceDurationMs": 300,
+    }
+    tuned = build_setup_payload(
+        model="m",
+        target_lang="pl",
+        echo_target=False,
+        layout=LAYOUT_SETUP,
+        activity=activity,
+    )
+    assert tuned["setup"]["realtimeInputConfig"]["automaticActivityDetection"] == {
+        "disabled": False,
+        "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+        "silenceDurationMs": 300,
+    }

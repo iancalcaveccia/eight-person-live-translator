@@ -40,6 +40,7 @@ import numpy as np
 from livekit import rtc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from latency_probe import (
     FRAME,
     RATE,
@@ -48,6 +49,8 @@ from latency_probe import (
     frame_db,
     load_wav_48k_mono,
 )
+
+from crosstalk import content_words
 
 THR_DB = -45.0
 TAIL_S = 8.0  # translation may trail the source by this much
@@ -215,6 +218,9 @@ async def connect(person: Person, url: str) -> None:
                     "seg": a.get("seg", ""),
                     "chars": len(text.strip()),
                     "retract": a.get("retract") == "true",
+                    # Synthetic voices only: kept to score translation drift
+                    # across repeats (--repeat); written out with --keep-captions.
+                    "text": text,
                 }
             )
 
@@ -257,17 +263,60 @@ def loud_times(series, a: float, b: float) -> list[float]:
     return [t for t, db in series if a <= t <= b and db > THR_DB]
 
 
-def analyse(people, spans, t0, wait_extra):
+def translation_text(lis, spk_pid: str, a: float, b: float) -> str:
+    """What the listener's captions showed from `spk` in [a, b], minus retractions."""
+    chunks = [
+        c
+        for c in lis.captions
+        if c["speaker"] == spk_pid
+        and c["kind"] == "translation"
+        and c["target"] == lis.listen
+        and a <= c["t"] <= b
+    ]
+    retracted = {
+        c["seg"]
+        for c in lis.captions
+        if c["retract"]
+        and c["speaker"] == spk_pid
+        and c["target"] == lis.listen
+        and a - 5 <= c["t"] <= b + 10
+    }
+    return " ".join(
+        c["text"].strip()
+        for c in chunks
+        if not c["retract"] and c["seg"] not in retracted
+    ).strip()
+
+
+def word_f1(a: str, b: str) -> float | None:
+    """Overlap of content words (multiset F1): 1.0 = same words, 0 = none shared."""
+    wa, wb = content_words(a), content_words(b)
+    if not wa or not wb:
+        return None
+    left = list(wb)
+    hit = 0
+    for w in wa:
+        if w in left:
+            left.remove(w)
+            hit += 1
+    if hit == 0:
+        return 0.0
+    p, r = hit / len(wa), hit / len(wb)
+    return round(2 * p * r / (p + r), 3)
+
+
+def analyse(people, spans, t0, wait_extra, window=None):
+    lo, hi = window if window else (float("-inf"), float("inf"))
     expected, phantoms = [], []
     for li, lis in enumerate(people):
         for si, spk in enumerate(people):
             if si == li:
                 continue
             name = f"tx:{spk.pid}:{lis.listen}"
-            series = lis.rx.get(name, [])
+            series = [(t, db) for t, db in lis.rx.get(name, []) if lo <= t <= hi]
             own = [s for s in spans if s["who"] == si]
             if spk.speak != lis.listen:
-                for s in own:
+                for idx, s in enumerate(own):
                     on, end = t0 + s["onset"], t0 + s["end"]
                     hits = loud_times(series, on, end + TAIL_S)
                     expected.append(
@@ -275,6 +324,7 @@ def analyse(people, spans, t0, wait_extra):
                             "speaker": spk.name,
                             "listener": lis.name,
                             "pair": f"{spk.speak}->{lis.listen}",
+                            "utterance": idx,
                             "at_s": round(s["start"], 1),
                             "speech_s": round(s["end"] - s["onset"], 1),
                             "first_audio_s": round(hits[0] - on, 2) if hits else None,
@@ -282,6 +332,7 @@ def analyse(people, spans, t0, wait_extra):
                                 hits and hits[0] < end
                             ),
                             "heard_s": round(len(hits) / 100, 1),
+                            "text": translation_text(lis, spk.pid, on, end + TAIL_S),
                         }
                     )
             # Phantom: audio on spk's track while spk was not talking.
@@ -308,6 +359,7 @@ def analyse(people, spans, t0, wait_extra):
                     c["speaker"] == spk.pid
                     and c["kind"] == "translation"
                     and c["target"] == lis.listen
+                    and lo <= c["t"] <= hi
                 ):
                     continue
                 if c["retract"]:
@@ -353,22 +405,28 @@ async def run(args) -> dict:
             )
         )
     total = max(u.start + (u.length or len(clips[u.clip]) / RATE) for u in utts) + 2
-    spans = build_mics(people, utts, clips, args.bleed_db, total)
-    # Phones deliver their mic streams with different delays (Bluetooth,
-    # capture pipeline): delay each person's whole mic signal by their skew.
+    if args.repeat > 1:
+        total += TAIL_S  # let each cycle's last translation finish inside it
     skews = [float(x) for x in args.skew_ms.split(",")] if args.skew_ms else []
-    for idx, ms in enumerate(skews[: len(people)]):
-        k = int(RATE * ms / 1000)
-        if k <= 0:
-            continue
-        mic = people[idx].mic
-        people[idx].mic = np.concatenate([mic[:k], mic])[: len(mic)]
-        for s in spans:
-            if s["who"] == idx:
-                for f in ("start", "onset", "end"):
-                    s[f] += ms / 1000
+
+    def prepare() -> list[dict]:
+        spans = build_mics(people, utts, clips, args.bleed_db, total)
+        # Phones deliver their mic streams with different delays (Bluetooth,
+        # capture pipeline): delay each person's whole mic signal by their skew.
+        for idx, ms in enumerate(skews[: len(people)]):
+            k = int(RATE * ms / 1000)
+            if k <= 0:
+                continue
+            mic = people[idx].mic
+            people[idx].mic = np.concatenate([mic[:k], mic])[: len(mic)]
+            for s in spans:
+                if s["who"] == idx:
+                    for f in ("start", "onset", "end"):
+                        s[f] += ms / 1000
+        return spans
 
     url, end = await join_all(args, people)
+    cycles: list[tuple[float, float, list[dict]]] = []
     try:
         for p in people:
             await connect(p, url)
@@ -383,9 +441,56 @@ async def run(args) -> dict:
                 break
             await asyncio.sleep(0.2)
         await asyncio.sleep(1.0)
-        t0, ratio = await publish(people)
+        # --repeat: the same conversation again and again in ONE room, so the
+        # provider streams live as long as in a real long session; the same
+        # audio each time makes later translations comparable to the first.
+        for k in range(args.repeat):
+            spans = prepare()
+            t0, ratio = await publish(people)
+            cycles.append((t0, ratio, spans))
+            if args.repeat > 1:
+                print(
+                    f"cycle {k + 1}/{args.repeat} published (x{ratio:.2f})", flush=True
+                )
         await asyncio.sleep(TAIL_S)
-        expected, phantoms = analyse(people, spans, t0, TAIL_S)
+        expected, phantoms, per_cycle = [], [], []
+        first_texts: dict[tuple[str, int], str] = {}
+        start0 = cycles[0][0]
+        for k, (t0, ratio, spans) in enumerate(cycles):
+            exp_k, ph_k = analyse(people, spans, t0, TAIL_S, window=(t0, t0 + total))
+            sims = []
+            for e in exp_k:
+                e["cycle"] = k + 1
+                key = (e["pair"], e["utterance"])
+                if k == 0:
+                    first_texts[key] = e["text"]
+                else:
+                    s = word_f1(e["text"], first_texts.get(key, ""))
+                    e["similarity_to_first"] = s
+                    if s is not None:
+                        sims.append(s)
+                if not args.keep_captions:
+                    e.pop("text", None)
+            for ph in ph_k:
+                ph["cycle"] = k + 1
+            f_k = [e["first_audio_s"] for e in exp_k if e["first_audio_s"] is not None]
+            per_cycle.append(
+                {
+                    "cycle": k + 1,
+                    "minute": round((t0 - start0) / 60, 1),
+                    "publish_ratio": round(ratio, 2),
+                    "heard": f"{len(f_k)}/{len(exp_k)}",
+                    "first_audio_median_s": round(float(np.median(f_k)), 2)
+                    if f_k
+                    else None,
+                    "phantom_s": round(sum(p["phantom_s"] for p in ph_k), 2),
+                    "similarity_to_first": round(float(np.mean(sims)), 3)
+                    if sims
+                    else None,
+                }
+            )
+            expected += exp_k
+            phantoms += ph_k
     finally:
         for p in people:
             for t in p.tasks:
@@ -393,13 +498,30 @@ async def run(args) -> dict:
             await p.room.disconnect()
         end()
 
+    ratio = max(r for _, r, _ in cycles) if cycles else 0.0
     firsts = [e["first_audio_s"] for e in expected if e["first_audio_s"] is not None]
+    halves = len(per_cycle) // 2
+
+    def _mean(rows, key):
+        vals = [r[key] for r in rows if r[key] is not None]
+        return round(float(np.mean(vals)), 3) if vals else None
+
     return {
         "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "app_host": args.app_url.split("//")[-1].split("/")[0],
         "people": [f"{p.name} speaks {p.speak}, hears {p.listen}" for p in people],
         "bleed_db": args.bleed_db,
         "phone_delay_ms": skews[: len(people)] if skews else None,
+        "repeats": args.repeat,
+        "cycles": per_cycle,
+        "first_half": {
+            "similarity_to_first": _mean(per_cycle[1:halves], "similarity_to_first"),
+            "first_audio_median_s": _mean(per_cycle[:halves], "first_audio_median_s"),
+        },
+        "second_half": {
+            "similarity_to_first": _mean(per_cycle[halves:], "similarity_to_first"),
+            "first_audio_median_s": _mean(per_cycle[halves:], "first_audio_median_s"),
+        },
         "published_in_real_time": ratio <= 1.1,
         "publish_time_ratio": round(ratio, 2),
         "translations_expected": len(expected),
@@ -444,6 +566,18 @@ def main() -> None:
         "--skew-ms",
         default="",
         help="per-person extra mic delay in ms, e.g. 0,250 (phones differ)",
+    )
+    p.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="play the whole --say schedule this many times in the same room "
+        "(long-session drift: per-cycle delay and similarity to cycle 1)",
+    )
+    p.add_argument(
+        "--keep-captions",
+        action="store_true",
+        help="write caption texts into the result (synthetic voices only)",
     )
     p.add_argument("--out")
     args = p.parse_args()

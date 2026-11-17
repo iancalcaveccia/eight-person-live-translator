@@ -171,6 +171,8 @@ class TranslationSession:
         publish_source: bool = False,
         emit_events: bool = True,
         crosstalk: CrossTalkDetector | None = None,
+        diag: Callable[..., None] | None = None,
+        speak_lang: str = "",
         resampler_factory: Callable[[int, int], Any] = default_resampler_factory,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -215,6 +217,13 @@ class TranslationSession:
         self.crosstalk_feed = False
         self.crosstalk_dropped_sec = 0.0
         self._crosstalk_tail_until = 0.0
+        # Content-free diagnostics (router -> control plane, kept 30 days).
+        self._diag_fn = diag
+        self.speak_lang = speak_lang
+        self._started_ts = clock()
+        self._minute: dict[str, Any] = {}
+        self._minute_ts = clock()
+        self._minute_backlog_max = 0.0
         # Provider's input language labels, counts only (no text).
         self.heard_languages: dict[str, int] = {}
         self._need_reconnect = asyncio.Event()
@@ -252,6 +261,70 @@ class TranslationSession:
             gap_sec=settings.caption_segment_gap_sec,
             clock=clock,
         )
+
+    # --- diagnostics -------------------------------------------------------------
+
+    def _diag(self, kind: str, **data: Any) -> None:
+        if self._diag_fn is None:
+            return
+        try:
+            self._diag_fn(kind, self.key.speaker, self.key.target, **data)
+        except Exception:  # pragma: no cover - diagnostics are best effort
+            logger.debug("diagnostics event failed", exc_info=True)
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            "out": self.meter.output_seconds,
+            "inp": self.meter.input_seconds,
+            "fa": len(self.meter.all_first_audio_ms),
+            "heard": dict(self.heard_languages),
+            "same": self.same_language_dropped_sec,
+            "xt": self.crosstalk_dropped_sec,
+            "drop": self._backlog.dropped_ms,
+            "stalls": self._stalls,
+            "rot": self.rotations,
+            "conn": self.connect_count,
+            "wh": getattr(self._input, "withheld_frames", 0),
+        }
+
+    def _minute_stats(self, now: float) -> None:
+        """Once a minute: what this stream did in the last minute (numbers only).
+        Shows drift over a long session: delay, the provider's language labels
+        (a speaker's own stream labelled in other languages = confusion), drops."""
+        snap = self._snapshot()
+        prev = self._minute or {k: (0 if k != "heard" else {}) for k in snap}
+        samples = self.meter.all_first_audio_ms[prev["fa"] :]
+        heard = {
+            lang: n - prev["heard"].get(lang, 0)
+            for lang, n in snap["heard"].items()
+            if n - prev["heard"].get(lang, 0) > 0
+        }
+        self._diag(
+            "minute",
+            age_min=round((now - self._started_ts) / 60, 1),
+            stream_age_s=round(
+                now - self._stream_started.get(id(self._current), now), 0
+            )
+            if self._current is not None
+            else 0,
+            output_s=round(snap["out"] - prev["out"], 1),
+            input_s=round(snap["inp"] - prev["inp"], 1),
+            first_audio_p50_ms=round(percentile(samples, 50)) if samples else -1,
+            first_audio_n=len(samples),
+            heard=heard,
+            same_language_dropped_s=round(snap["same"] - prev["same"], 1),
+            crosstalk_dropped_s=round(snap["xt"] - prev["xt"], 1),
+            backlog_dropped_ms=round(snap["drop"] - prev["drop"]),
+            backlog_max_ms=round(self._minute_backlog_max),
+            stalls=snap["stalls"] - prev["stalls"],
+            rotations=snap["rot"] - prev["rot"],
+            reconnects=snap["conn"] - prev["conn"],
+            withheld_s=round((snap["wh"] - prev["wh"]) / 100, 1),
+            state=self.state,
+        )
+        self._minute = snap
+        self._minute_ts = now
+        self._minute_backlog_max = 0.0
 
     # --- outbox (captions + events never block the audio path) ----------------
 
@@ -359,6 +432,14 @@ class TranslationSession:
             self.provider.name,
             self._echo,
         )
+        self._started_ts = self._minute_ts = self._clock()
+        self._diag(
+            "session_started",
+            provider=self.provider.name,
+            echo=self._echo,
+            speak_lang=self.speak_lang,
+            comparison=not self._publish_captions,
+        )
 
     def _attach_input(self) -> None:
         prov = self.provider
@@ -417,6 +498,24 @@ class TranslationSession:
             self.same_language_dropped_sec,
             self.crosstalk_dropped_sec,
         )
+        samples = self.meter.all_first_audio_ms
+        p50, p95 = percentile(samples, 50), percentile(samples, 95)
+        self._diag(
+            "session_closed",
+            reason=reason,
+            minutes=round((self._clock() - self._started_ts) / 60, 1),
+            provider=self.provider.name,
+            heard=dict(self.heard_languages),
+            same_language_dropped_s=round(self.same_language_dropped_sec, 1),
+            crosstalk_dropped_s=round(self.crosstalk_dropped_sec, 1),
+            rotations=self.rotations,
+            connects=self.connect_count,
+            stalls=self._stalls,
+            backlog_dropped_ms=round(self._backlog.dropped_ms),
+            first_audio_p50_ms=round(p50) if p50 is not None else -1,
+            first_audio_p95_ms=round(p95) if p95 is not None else -1,
+            first_audio_n=len(samples),
+        )
 
     # --- state/events ---------------------------------------------------------
 
@@ -453,6 +552,9 @@ class TranslationSession:
             except ProviderError as exc:
                 self.meter.errors += 1
                 self._failures += 1
+                self._diag(
+                    "stream_error", code="connect_failed", retryable=exc.retryable
+                )
                 logger.warning(
                     "connect failed %s via %s (#%d): %s",
                     self.key.short(),
@@ -621,6 +723,11 @@ class TranslationSession:
                 elif isinstance(ev, StreamError):
                     self.meter.errors += 1
                     logger.warning("stream error %s: %s", self.key.short(), ev.message)
+                    self._diag(
+                        "stream_error",
+                        code=(str(ev.code) or "none")[:32].replace(" ", "_"),
+                        retryable=ev.retryable,
+                    )
                     if not ev.retryable:
                         self._failures = (
                             self._settings.provider_failures_before_fallback
@@ -636,9 +743,29 @@ class TranslationSession:
         elif stream is not self._current:
             await self._drop_stream(stream)
 
-    async def _rotate(self, old: ProviderStream) -> None:
+    def _maybe_refresh(self, now: float) -> None:
+        """Fresh provider memory every `stream_refresh_sec`, at a pause: the
+        speaker is quiet and nothing is still being voiced or queued."""
+        every = self._settings.stream_refresh_sec
+        cur = self._current
+        if every <= 0 or cur is None or self._rotating or self._closed.is_set():
+            return
+        if now - self._stream_started.get(id(cur), now) < every:
+            return
+        if self._input.speech_active:
+            return  # wait for a pause
+        if self._last_output_ts is not None and now - self._last_output_ts < 1.5:
+            return  # a translation is still coming out
+        if self._sink is not None and self._sink.queued_ms() > 200:
+            return
+        task = asyncio.create_task(self._rotate(cur, why="refresh"))
+        self._receivers.add(task)
+        task.add_done_callback(self._receivers.discard)
+
+    async def _rotate(self, old: ProviderStream, why: str = "goaway") -> None:
         """Make-before-break: open a new stream, switch input, drain the old one."""
         self._rotating = True
+        age = self._clock() - self._stream_started.get(id(old), self._clock())
         try:
             try:
                 new = await self.provider.connect(
@@ -646,11 +773,18 @@ class TranslationSession:
                 )
             except ProviderError as exc:
                 logger.warning("rotation connect failed %s: %s", self.key.short(), exc)
+                self._diag("stream_error", code="rotation_connect_failed", why=why)
                 return
             self.rotations += 1
             self.connect_count += 1
             await self._install(new)
-            logger.info("rotated provider stream %s", self.key.short())
+            logger.info(
+                "rotated provider stream %s (%s, after %.0f s)",
+                self.key.short(),
+                why,
+                age,
+            )
+            self._diag("rotation", why=why, age_s=round(age))
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
                     self._closed.wait(), timeout=self._settings.rotation_drain_sec
@@ -710,6 +844,7 @@ class TranslationSession:
         if out:
             await self._sink.write(out)
         backlog = self._sink.queued_ms()
+        self._minute_backlog_max = max(self._minute_backlog_max, backlog)
         if backlog >= self._settings.backlog_soft_ms:
             await self._set_state("delayed", reason="backlog")
         elif self.state == "delayed":
@@ -827,6 +962,10 @@ class TranslationSession:
                 self._captions.tick()
                 if self.publish_source:
                     self._source_captions.tick()
+            tick_now = self._clock()
+            if tick_now - self._minute_ts >= 60.0:
+                self._minute_stats(tick_now)
+            self._maybe_refresh(tick_now)
             if self.state not in ("live", "delayed"):
                 continue
             now = self._clock()
