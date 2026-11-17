@@ -52,6 +52,12 @@ HEALTHY_STREAM_SEC = 10.0
 # Input transcripts arrive about once a second; keep dropping output this long
 # after the last one that said "already in the target language".
 SAME_LANGUAGE_HOLD_SEC = 3.0
+# A neighbour's leaked Spanish was labelled 'it' by Gemini (22 of 67 labels in
+# the side-by-side simulation), so also drop output when most recent labels are
+# not the speaker's declared language. One odd label (clean Spanish was once
+# labelled 'it') must not drop a real translation.
+FOREIGN_LABEL_WINDOW = 4
+FOREIGN_LABELS_TO_DROP = 3
 
 
 @dataclass(frozen=True)
@@ -186,6 +192,10 @@ class TranslationSession:
         self._same_lang_until = 0.0  # drop output until then (input = target lang)
         self.same_language_segments = 0
         self.same_language_dropped_sec = 0.0
+        # Provider's input language labels, counts only (no text).
+        self.heard_languages: dict[str, int] = {}
+        self.speaker_lang = ""  # declared speak language (set by the router)
+        self._recent_labels: deque[str] = deque(maxlen=FOREIGN_LABEL_WINDOW)
         self._need_reconnect = asyncio.Event()
         self._closed = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -377,7 +387,13 @@ class TranslationSession:
             await self._sink.aclose()
         await self._set_state("stopped", reason=reason)
         await self._flush_outbox()
-        logger.info("session closed %s (%s)", self.key.short(), reason)
+        logger.info(
+            "session closed %s (%s) heard_languages=%s same_language_dropped=%.1fs",
+            self.key.short(),
+            reason,
+            self.heard_languages,
+            self.same_language_dropped_sec,
+        )
 
     # --- state/events ---------------------------------------------------------
 
@@ -686,14 +702,34 @@ class TranslationSession:
         words back; `echoTargetLanguage=false` alone did not stop it). Output is
         dropped while such input continues. Never applied to echo sessions
         ("I switch languages" speakers), where repeating is intended."""
-        if ev.kind != "input" or not ev.lang or self._echo:
+        if ev.kind != "input" or not ev.lang:
             return
         heard = ev.lang.split("-")[0].lower()
+        self.heard_languages[heard] = self.heard_languages.get(heard, 0) + 1
+        if self._echo:
+            return
+        declared = self.speaker_lang.split("-")[0].lower()
         if heard == self.key.target.split("-")[0].lower():
             self._same_lang_until = self._clock() + SAME_LANGUAGE_HOLD_SEC
             self.same_language_segments += 1
-        else:
+            self._recent_labels.append(heard)
+            return
+        if not declared or declared == "auto":
+            self._same_lang_until = 0.0  # unknown declared language: target rule only
+            return
+        if heard == declared:
+            # The speaker's own language: translate, and forget earlier labels
+            # so their next words are never held back by a neighbour's.
             self._same_lang_until = 0.0
+            self._recent_labels.clear()
+            return
+        self._recent_labels.append(heard)
+        foreign = sum(
+            1 for lang in self._recent_labels if lang not in (declared, "und")
+        )
+        if declared and declared != "auto" and foreign >= FOREIGN_LABELS_TO_DROP:
+            self._same_lang_until = self._clock() + SAME_LANGUAGE_HOLD_SEC
+            self.same_language_segments += 1
 
     async def _on_transcript(self, ev: TranscriptOut) -> None:
         self._note_input_language(ev)
