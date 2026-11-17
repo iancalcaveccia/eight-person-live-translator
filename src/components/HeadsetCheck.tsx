@@ -30,7 +30,7 @@ export default function HeadsetCheck() {
           deviceId: id ? { exact: id } : undefined,
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true,
+          autoGainControl: false, // same capture settings as the live room
         },
       });
       streamRef.current = stream;

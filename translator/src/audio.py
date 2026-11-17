@@ -116,7 +116,19 @@ class BleedGuard:
       * the maximum Pearson correlation of the two envelopes over lags within
         +/- max_lag_ms is >= corr_threshold.
     Both conditions must hold, which keeps independent (even quiet)
-    interjections from being suppressed.
+    interjections from being suppressed. Because room reverb smears the leaked
+    envelope, a lower correlation (`corr_relaxed`) also counts when B stays at
+    least `bound_margin_db` below A's recent peak in `bounded_ratio` of its
+    active bins (a leak never approaches its source's level; B's own voice
+    does).
+
+    The decision is sticky: once B is flagged against A it stays flagged until
+    `release_evals` consecutive evaluations miss, so a short dip in correlation
+    cannot let a leak through (the input gate's hangover would otherwise keep
+    forwarding it for seconds). A frame is never flagged when B is nearly as
+    loud as A's own microphone (within `own_voice_margin_db`): a leak is always
+    much quieter than its source, so that is B's own voice, e.g. an
+    interjection over A.
     """
 
     BIN_MS = 10
@@ -133,6 +145,14 @@ class BleedGuard:
         active_dbfs: float = -50.0,
         floor_dbfs: float = -60.0,
         eval_every_bins: int = 5,
+        corr_relaxed: float = 0.7,
+        bounded_ratio: float = 0.95,
+        bound_margin_db: float = 14.0,
+        release_evals: int = 6,
+        own_voice_margin_db: float = 10.0,
+        own_voice_rise_db: float = 10.0,
+        own_voice_hold_ms: int = 1500,
+        own_voice_persist_ms: int = 80,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.enabled = enabled
@@ -144,12 +164,29 @@ class BleedGuard:
         self._active = active_dbfs
         self._floor = floor_dbfs
         self._eval_every = eval_every_bins
+        self._corr_relaxed = corr_relaxed
+        self._bounded_ratio = bounded_ratio
+        self._bound_margin = bound_margin_db
+        self._release = max(1, release_evals)
+        self._own_margin = own_voice_margin_db
         self._clock = clock
         self._history = self._win + 2 * self._lag + 20
         self._env: dict[str, dict[int, float]] = {}
         self._last_eval_bin: dict[str, int] = {}
         self._cached: dict[str, bool] = {}
         self._hits: dict[str, int] = {}
+        self._misses: dict[str, int] = {}
+        self._source: dict[str, str] = {}  # speaker -> whose voice leaks into it
+        self._seq: dict[str, tuple[int, int]] = {}  # speaker -> (anchor bin, frames)
+        self._last_bin: dict[str, int] = {}
+        self._resync_bins = max(20, 2 * self._lag + 10)
+        self._leak_level: dict[str, float] = {}  # B's median level while leaking
+        self._last_b_level = active_dbfs
+        self._own_rise = own_voice_rise_db
+        self._own_hold = max(0, own_voice_hold_ms // self.BIN_MS)
+        self._own_until: dict[str, int] = {}
+        self._own_run: dict[str, int] = {}
+        self._own_persist = max(1, own_voice_persist_ms // self.BIN_MS)
         self.flag_count: dict[str, int] = {}
 
     def remove(self, speaker: str) -> None:
@@ -157,11 +194,32 @@ class BleedGuard:
         self._last_eval_bin.pop(speaker, None)
         self._cached.pop(speaker, None)
         self._hits.pop(speaker, None)
+        self._misses.pop(speaker, None)
+        self._source.pop(speaker, None)
+        self._seq.pop(speaker, None)
+        self._last_bin.pop(speaker, None)
+        self._leak_level.pop(speaker, None)
+        self._own_until.pop(speaker, None)
+        self._own_run.pop(speaker, None)
+        for k in [k for k, v in self._source.items() if v == speaker]:
+            self._source.pop(k, None)
+            self._cached[k] = False
 
     def update(self, speaker: str, level_db: float, ts: float | None = None) -> None:
         if not self.enabled:
             return
-        b = int((self._clock() if ts is None else ts) * 1000 // self.BIN_MS)
+        # Bin by position in the speaker's stream (one 10 ms frame = one bin),
+        # anchored to arrival time. Binning by raw arrival time leaves holes
+        # and doubles whenever frames arrive in bursts (network jitter, float
+        # rounding); holes read as silence and destroy the envelope
+        # correlation. Re-anchor only after a real stall or skip.
+        arrival = round((self._clock() if ts is None else ts) * 1000 / self.BIN_MS)
+        anchor, count = self._seq.get(speaker, (arrival, 0))
+        b = anchor + count
+        if abs(b - arrival) > self._resync_bins:
+            anchor, count, b = arrival, 0, arrival
+        self._seq[speaker] = (anchor, count + 1)
+        self._last_bin[speaker] = b
         env = self._env.setdefault(speaker, {})
         env[b] = max(level_db, env.get(b, SILENCE_DBFS))
         if len(env) > self._history * 2:
@@ -179,32 +237,114 @@ class BleedGuard:
     def is_bleed(self, speaker: str, ts: float | None = None) -> bool:
         if not self.enabled or len(self._env) < 2:
             return False
-        now_bin = int((self._clock() if ts is None else ts) * 1000 // self.BIN_MS)
+        now_bin = self._last_bin.get(speaker)
+        if now_bin is None:
+            now_bin = round((self._clock() if ts is None else ts) * 1000 / self.BIN_MS)
         last = self._last_eval_bin.get(speaker)
-        if last is not None and now_bin - last < self._eval_every:
-            return self._cached.get(speaker, False)
-        self._last_eval_bin[speaker] = now_bin
-        hit = self._evaluate(speaker, now_bin)
-        hits = self._hits.get(speaker, 0) + 1 if hit else 0
-        self._hits[speaker] = hits
-        result = hits >= self._persist  # require persistence before suppressing
-        self._cached[speaker] = result
-        if result:
-            self.flag_count[speaker] = self.flag_count.get(speaker, 0) + 1
-        return result
+        if last is None or now_bin - last >= self._eval_every:
+            self._last_eval_bin[speaker] = now_bin
+            self._decide(speaker, now_bin)
+        if self._own_until.get(speaker, -1) >= now_bin:
+            return False  # B is talking: don't flap on its softer syllables
+        if not self._cached.get(speaker, False):
+            return False
+        if self._sounds_like_own_voice(speaker, now_bin):
+            run = self._own_run.get(speaker, 0) + 1
+            self._own_run[speaker] = run
+            if run >= self._own_persist:
+                # B's own voice over A, confirmed for longer than any network
+                # skew: hold the flag off so the whole interjection gets
+                # through, and start the leak decision afresh.
+                self._own_until[speaker] = now_bin + self._own_hold
+                self._cached[speaker] = False
+                self._hits[speaker] = 0
+                self._misses[speaker] = 0
+                self._own_run[speaker] = 0
+                return False
+        else:
+            # One softer frame pauses the count instead of resetting it.
+            self._own_run[speaker] = max(0, self._own_run.get(speaker, 0) - 1)
+        self.flag_count[speaker] = self.flag_count.get(speaker, 0) + 1
+        return True
 
-    def _evaluate(self, speaker: str, now_bin: int) -> bool:
+    def _decide(self, speaker: str, now_bin: int) -> None:
+        source = self._evaluate(speaker, now_bin)
+        if source is not None:
+            self._leak_level[speaker] = self._last_b_level
+            self._misses[speaker] = 0
+            hits = self._hits.get(speaker, 0) + 1
+            self._hits[speaker] = hits
+            if hits >= self._persist:  # require persistence before suppressing
+                self._cached[speaker] = True
+                self._source[speaker] = source
+            return
+        self._hits[speaker] = 0
+        if self._cached.get(speaker, False):
+            if self._still_dominated(speaker, now_bin):
+                return  # the source is still far louder: not a reason to release
+            misses = self._misses.get(speaker, 0) + 1
+            self._misses[speaker] = misses
+            if misses >= self._release:  # sticky: release only after a clear stop
+                self._cached[speaker] = False
+                self._misses[speaker] = 0
+                self._source.pop(speaker, None)
+
+    def _recent_peak(self, speaker: str, now_bin: int) -> float:
+        env = self._env.get(speaker, {})
+        return max(
+            (env.get(now_bin - i, SILENCE_DBFS) for i in range(0, 2 * self._lag + 1)),
+            default=SILENCE_DBFS,
+        )
+
+    def _still_dominated(self, speaker: str, now_bin: int) -> bool:
+        source = self._source.get(speaker)
+        if source is None:
+            return False
+        a = self._recent_peak(source, now_bin)
+        return (
+            a > self._active and a - self._recent_peak(speaker, now_bin) >= self._diff
+        )
+
+    def _sounds_like_own_voice(self, speaker: str, now_bin: int) -> bool:
+        """B's current frame carries a voice nearly as loud as A's own mic ->
+        B is talking (e.g. an interjection over A), not a leak."""
+        source = self._source.get(speaker)
+        if source is None:
+            return False
+        b_now = self._env.get(speaker, {}).get(now_bin, SILENCE_DBFS)
+        if b_now <= self._active:
+            return False  # pauses: both mics near the noise floor
+        # A's frames may arrive later than B's (network skew), so at the onset
+        # of A's word the leak in B can precede A's own frames. Own speech
+        # into a close mic also rises far above the leak level seen so far.
+        leak = self._leak_level.get(speaker, self._active)
+        if b_now < leak + self._own_rise:
+            return False
+        # Compare with A's typical recent level (not its peak, which a softer
+        # talker's syllables rarely reach): a leak sits ~20 dB below it.
+        a_env = self._env.get(source, {})
+        recent = [
+            v
+            for v in (a_env.get(now_bin - i) for i in range(0, 2 * self._lag + 1))
+            if v is not None and v > self._active
+        ]
+        a_level = float(np.median(recent)) if recent else SILENCE_DBFS
+        return b_now >= a_level - self._own_margin
+
+    def _evaluate(self, speaker: str, now_bin: int) -> str | None:
+        """Return the speaker whose voice leaks into `speaker`'s mic, if any."""
         # Leave a margin for frames of other speakers that have not arrived yet.
         end = now_bin - self._lag
         start = end - self._win
         b = self._series(speaker, start, self._win)
         b_active = b[b > self._active]
         if b_active.size < self._win * 0.3:
-            return False
+            return None
         b_level = float(np.median(b_active))
+        self._last_b_level = b_level
         b_std = float(np.std(b))
         if b_std < 1e-3:
-            return False
+            return None
         for other in self._env:
             if other == speaker:
                 continue
@@ -220,8 +360,22 @@ class BleedGuard:
             )
             corr = _max_corr(np.maximum(b, self._floor), windows)
             if corr >= self._corr:
-                return True
-        return False
+                return other
+            if corr < self._corr_relaxed:
+                continue
+            # Reverb smears the leaked envelope, so correlation alone misses
+            # fluent speech. Physics helps: a leak is never close to its
+            # source's level, so B stays `bound_margin_db` below A's recent
+            # peak (+/- lag) in nearly every active bin. B's own voice breaks
+            # that bound constantly.
+            a_peak = np.lib.stride_tricks.sliding_window_view(
+                a_ext, 2 * self._lag + 1
+            ).max(axis=1)[: self._win]
+            mask = b > self._active
+            bounded = float(np.mean(b[mask] <= a_peak[mask] - self._bound_margin))
+            if bounded >= self._bounded_ratio:
+                return other
+        return None
 
 
 def _max_corr(b: np.ndarray, windows: np.ndarray) -> float:
@@ -300,6 +454,12 @@ class InputGate:
             return [chunk]
 
         if self._open:
+            if chunk.bleed:
+                # Only someone else's voice is coming in: the hangover exists to
+                # let THIS speaker finish, not to forward a neighbour's speech.
+                self._open = False
+                self._pre_roll.append(chunk)
+                return []
             if (
                 self._last_speech_ts is not None
                 and chunk.ts - self._last_speech_ts > self._hangover
@@ -323,9 +483,8 @@ class Subscription:
         self.chunk_ms = chunk_ms
         self._chunk_bytes = int(sample_rate * chunk_ms / 1000) * 2
         self._buf = bytearray()
-        self._speech = False
-        self._all_bleed = True
-        self._any_flag = False
+        self._n_speech = 0  # frames of the speaker's own (unflagged) speech
+        self._n_bleed = 0  # speech-like frames flagged as someone else's voice
         self._ts: float | None = None
         self.queue: asyncio.Queue[InputChunk | None] = asyncio.Queue(maxsize=max_queue)
         self.dropped_chunks = 0
@@ -337,24 +496,27 @@ class Subscription:
         if self._ts is None:
             self._ts = ts
         self._buf.extend(pcm)
-        self._speech = self._speech or speech
-        if speech or bleed:
-            self._any_flag = True
-            self._all_bleed = self._all_bleed and bleed and not speech
+        if speech:
+            self._n_speech += 1
+        elif bleed:
+            self._n_bleed += 1
         while len(self._buf) >= self._chunk_bytes:
             out = bytes(self._buf[: self._chunk_bytes])
             del self._buf[: self._chunk_bytes]
+            # Majority vote: one stray unflagged frame inside a leaked chunk
+            # must not open the gate (it would forward the pre-roll of the
+            # neighbour's voice). With no bleed flags this is "any speech".
+            own = self._n_speech > 0 and self._n_speech >= self._n_bleed
             chunk = InputChunk(
                 pcm=out,
                 sample_rate=self.sample_rate,
-                speech=self._speech,
-                bleed=self._any_flag and self._all_bleed,
+                speech=own,
+                bleed=self._n_bleed > 0 and not own,
                 ts=self._ts if self._ts is not None else ts,
             )
             self._push(chunk)
-            self._speech = False
-            self._all_bleed = True
-            self._any_flag = False
+            self._n_speech = 0
+            self._n_bleed = 0
             self._ts = ts
 
     def _push(self, chunk: InputChunk) -> None:

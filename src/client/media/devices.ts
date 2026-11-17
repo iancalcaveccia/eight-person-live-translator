@@ -86,7 +86,7 @@ export async function recordLoopback(deviceId: string | null, seconds = 3): Prom
       deviceId: deviceId ? { exact: deviceId } : undefined,
       echoCancellation: true,
       noiseSuppression: true,
-      autoGainControl: true,
+      autoGainControl: false, // same capture settings as the live room
     },
   });
   try {

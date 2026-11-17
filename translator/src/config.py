@@ -116,6 +116,19 @@ class Settings:
     bleed_window_ms: int = 1000
     bleed_max_lag_ms: int = 120
     bleed_persist_evals: int = 3
+    # Real-service simulation 2026-11-17 (2 people, ES/PL, reverberant room):
+    # the 0.9 rule alone caught only ~70 % of evaluations and every miss let the
+    # gate's hangover forward seconds of the neighbour's voice. Hence: a lower
+    # correlation when the neighbour is far louder, sticky flags, and an
+    # own-voice override. See docs/architecture/WORKER.md.
+    bleed_corr_relaxed: float = 0.7
+    bleed_bounded_ratio: float = 0.95
+    bleed_bound_margin_db: float = 14.0
+    bleed_release_evals: int = 6
+    bleed_own_voice_margin_db: float = 10.0
+    bleed_own_voice_rise_db: float = 10.0
+    bleed_own_voice_hold_ms: int = 1500
+    bleed_own_voice_persist_ms: int = 80
 
     # Output / backlog
     output_queue_ms: int = 30000

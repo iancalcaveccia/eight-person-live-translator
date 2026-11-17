@@ -257,7 +257,10 @@ export class MediaSession {
       audioCaptureDefaults: {
         echoCancellation: true,
         noiseSuppression: true,
-        autoGainControl: true,
+        // Off on purpose: AGC turns the mic up while you are silent, which
+        // makes a neighbour's voice leaking into it almost as loud as your
+        // own and defeats the worker's same-room bleed guard.
+        autoGainControl: false,
         channelCount: 1,
         deviceId: this.settings?.micDeviceId ?? undefined,
       },
@@ -592,7 +595,7 @@ export class MediaSession {
       deviceId: this.settings?.micDeviceId ?? undefined,
       echoCancellation: true,
       noiseSuppression: true,
-      autoGainControl: true,
+      autoGainControl: false, // see audioCaptureDefaults
       channelCount: 1,
     });
     if (on) {

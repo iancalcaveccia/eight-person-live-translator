@@ -312,6 +312,14 @@ class TranslationRouter:
             window_ms=settings.bleed_window_ms,
             max_lag_ms=settings.bleed_max_lag_ms,
             persist_evals=settings.bleed_persist_evals,
+            corr_relaxed=settings.bleed_corr_relaxed,
+            bounded_ratio=settings.bleed_bounded_ratio,
+            bound_margin_db=settings.bleed_bound_margin_db,
+            release_evals=settings.bleed_release_evals,
+            own_voice_margin_db=settings.bleed_own_voice_margin_db,
+            own_voice_rise_db=settings.bleed_own_voice_rise_db,
+            own_voice_hold_ms=settings.bleed_own_voice_hold_ms,
+            own_voice_persist_ms=settings.bleed_own_voice_persist_ms,
         )
         self.admission = AdmissionManager(
             client=control_plane,

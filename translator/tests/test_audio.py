@@ -183,6 +183,76 @@ def test_bleed_guard_never_flags_independent_speech(seed, db):
     assert flagged == 0
 
 
+def _run_pair(
+    a: np.ndarray, b: np.ndarray, *, b_skew_s: float = 0.06, burst: int = 1
+) -> list[tuple[int, bool]]:
+    """Feed A and B like the worker does (B arrives later, frames in bursts of
+    `burst`). Returns (frame index, flagged) for B's speech-like frames."""
+    guard = BleedGuard(enabled=True)
+    ea, eb = _env(a), _env(b)
+    events = []
+    for i in range(len(ea)):
+        events.append((((i // burst) * burst) * 0.01, 0, i))
+        events.append((((i // burst) * burst) * 0.01 + b_skew_s, 1, i))
+    out = []
+    for ts, who, i in sorted(events):
+        if who == 0:
+            guard.update("A", ea[i], ts)
+            continue
+        guard.update("B", eb[i], ts)
+        if eb[i] > -50:
+            out.append((i, guard.is_bleed("B", ts)))
+    return out
+
+
+@pytest.mark.parametrize("burst", [1, 2, 4])
+def test_bleed_guard_catches_leak_when_frames_arrive_in_bursts(burst):
+    """Regression (2026-11-17): bins were keyed by arrival time, so bursty
+    delivery left holes that read as silence and broke the correlation; the
+    live simulation forwarded ~40 s of a neighbour's voice."""
+    a = speech_like(8.0, seed=21, level=0.3)
+    flags = [f for i, f in _run_pair(a, _room_leak(a, 20, 4), burst=burst) if i > 150]
+    assert flags
+    assert sum(flags) / len(flags) > 0.9
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_soft_interjection_over_a_loud_speaker_still_gets_through(seed):
+    """B's own voice 6 dB softer than A, on top of A's leak: once confirmed
+    (80 ms) it must not be suppressed for the rest of the interjection."""
+    a = speech_like(8.0, seed=30 + seed, level=0.3)
+    own = np.zeros_like(a)
+    s, e = int(4.0 * 48000), int(5.5 * 48000)
+    own[s:e] = speech_like(1.5, seed=60 + seed, level=0.3 * 10 ** (-6 / 20))
+    b = (_room_leak(a, 20, seed).astype(np.int32) + own).clip(-32768, 32767)
+    flags = [f for i, f in _run_pair(a, b.astype(np.int16)) if 420 <= i < 550]
+    assert flags
+    assert sum(flags) / len(flags) < 0.1
+
+
+def test_gate_closes_on_bleed_instead_of_forwarding_it_during_hangover():
+    gate = InputGate(enabled=True, pre_roll_ms=300, hangover_ms=2500, chunk_ms=100)
+    assert gate.process(_chunk(0.0, speech=True))
+    # Speaker stops; a neighbour's voice (flagged) comes in during the hangover.
+    assert gate.process(_chunk(0.1, speech=False, bleed=True)) == []
+    assert not gate.is_open
+    # Their own next words still open it, with the pre-roll.
+    assert len(gate.process(_chunk(0.2, speech=True))) >= 1
+
+
+def test_subscription_majority_vote_ignores_a_stray_unflagged_frame():
+    sub = Subscription(sample_rate=16000, chunk_ms=100)
+    frame = b"\x00\x00" * 160
+    for i in range(10):  # 9 leak frames + 1 frame that slipped through
+        sub.feed(frame, speech=(i == 5), bleed=(i != 5), ts=i * 0.01)
+    leak = sub.queue.get_nowait()
+    assert not leak.speech and leak.bleed
+    for i in range(10):  # no bleed at all: any speech frame counts, as before
+        sub.feed(frame, speech=(i == 5), bleed=False, ts=0.1 + i * 0.01)
+    own = sub.queue.get_nowait()
+    assert own.speech and not own.bleed
+
+
 def test_bleed_guard_disabled():
     guard = BleedGuard(enabled=False)
     guard.update("A", -10.0, 0.0)
