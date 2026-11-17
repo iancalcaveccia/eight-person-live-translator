@@ -1,0 +1,101 @@
+{
+  "date_utc": "2026-11-17T15:04:30Z",
+  "app_host": "eight-person-live-translator.vercel.app",
+  "people": [
+    "Ian speaks es, hears es",
+    "Partner speaks pl, hears pl"
+  ],
+  "bleed_db": -12.0,
+  "published_in_real_time": true,
+  "publish_time_ratio": 1.0,
+  "translations_expected": 6,
+  "translations_heard": 6,
+  "all_began_before_speaker_stopped": true,
+  "first_audio_median_s": 2.85,
+  "first_audio_max_s": 3.48,
+  "phantom_total_s": 0.27,
+  "expected": [
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 40.0,
+      "speech_s": 29.7,
+      "first_audio_s": 3.28,
+      "began_before_speaker_stopped": true,
+      "heard_s": 24.2
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 85.0,
+      "speech_s": 2.1,
+      "first_audio_s": 2.03,
+      "began_before_speaker_stopped": true,
+      "heard_s": 2.0
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 105.0,
+      "speech_s": 11.7,
+      "first_audio_s": 1.61,
+      "began_before_speaker_stopped": true,
+      "heard_s": 9.9
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 3.0,
+      "speech_s": 29.7,
+      "first_audio_s": 3.48,
+      "began_before_speaker_stopped": true,
+      "heard_s": 20.5
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 77.0,
+      "speech_s": 19.7,
+      "first_audio_s": 3.04,
+      "began_before_speaker_stopped": true,
+      "heard_s": 12.8
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 105.0,
+      "speech_s": 11.7,
+      "first_audio_s": 2.67,
+      "began_before_speaker_stopped": true,
+      "heard_s": 9.4
+    }
+  ],
+  "phantoms": [
+    {
+      "track_of": "Partner",
+      "heard_by": "Ian",
+      "language": "es",
+      "phantom_s": 0.27,
+      "phantom_at_s": [
+        "78.3-78.5"
+      ],
+      "subscribed": true
+    },
+    {
+      "track_of": "Ian",
+      "heard_by": "Partner",
+      "language": "pl",
+      "phantom_s": 0.0,
+      "phantom_at_s": [],
+      "subscribed": true
+    }
+  ],
+  "host": "Windows-11-10.0.26300-SP0",
+  "note": "Synthetic voices and synthetic room bleed; not a phone/Bluetooth test."
+}

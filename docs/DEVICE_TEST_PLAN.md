@@ -23,6 +23,7 @@ measured delays; use **Copy** of the numbers into this table.
 | 4 | Reverse (pl → es), and en ↔ pl, en ↔ es | Same | Same |
 | 5 | Same-language passthrough | Both choose Polish | Original voice heard, status "Everyone here speaks your language", cost stays $0.00 |
 | 6 | Interjection | A talks 20 s; B says "Co?! Serio?!" at ~8 s | A hears B's translated interjection before finishing; A's mic stays live |
+| 6b | Same-room cross-talk | A talks 30 s while B stays silent, ~1 m apart; then side by side | A never hears their own words back; B hears each sentence once; only A's card lights up (simulated: 0 s at 1 m, 0.3–12 s side by side) |
 | 7 | Screen lock (Android) | Lock 5 min while talking | Note whether audio continues |
 | 8 | Screen lock (iPhone) | Lock 5 min | Expected to pause; confirm it recovers on unlock |
 | 9 | Wi-Fi → mobile data | Toggle Wi-Fi off mid-sentence | "Reconnecting…" then live again within N s (record N) |

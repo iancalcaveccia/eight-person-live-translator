@@ -83,32 +83,64 @@ silent:
 
 ## Bleed guard (same-room microphones) — `BLEED_GUARD=true`
 
-Problem: at a dinner table each headset mic also hears neighbours, so a
-neighbour's speech could be translated twice. Guard: for speaker B, frames are
-flagged only when another speaker A is ≥ 13 dB louder AND B's 10 ms energy
-envelope correlates ≥ 0.90 with A's (lags ±120 ms, 1 s window) for 3
-consecutive evaluations (150 ms).
+Problem: at a dinner table each headset mic also hears neighbours. Without a
+guard a neighbour's speech is translated through the wrong person's session:
+with two people (ES/PL) that means **you hear your own words back** (Gemini
+re-voices leaked Spanish into Spanish; `echoTargetLanguage=false` does not stop
+it, partly because leaked Spanish is often labelled Italian), and with three
+languages a third listener hears the same sentence twice.
 
-What a flag does: for gated providers it only prevents the gate from
-*opening*; flagged audio stays in the 600 ms pre-roll and is sent if real
-speech follows (delayed, not lost — **verified**). For OpenAI (no gating) flags
-are ignored, so a false flag can never erase speech there.
+Live simulation through the deployed app before the 2026-11-17 fix
+(`scripts/table_sim.py`, 2 people 1 m apart, −20 dB leak with room reverb):
+**42 s** of such "phantom" audio in 2 minutes. Root causes, found with the
+offline bench `scripts/bleed_bench.py` (real worker code, no cost):
 
-Synthetic evaluation (room-impulse-response leak model, 10 seeds):
+1. Envelope bins were keyed by arrival time; bursty delivery left holes that
+   read as silence and broke the correlation (0.4–0.7 live vs 0.95 clean).
+   Bins now follow each speaker's stream position, anchored to arrival.
+2. Any miss let the gate open and its 2.5 s hangover forwarded the leak.
 
-| Case | Result |
-|---|---|
-| Leak 15 dB / 18 dB below the talker | 97 % / 97 % of evaluations flagged |
-| Leak 24 dB below | 37 % flagged (weak leaks are less of a problem) |
-| Independent speech at same level, −6, −10, −12 dB | 0 false flags (also **verified** in unit tests, 18 cases) |
-| Independent speech −14 / −18 dB (whisper next to a loud talker) | 11 / 7 flagged 50 ms decisions over 10 × 6 s clips (≈ 1 %) — delayed via pre-roll, not lost |
+Guard now (speaker B, possible source A in the same room):
 
-Limitations: synthetic signals only; real rooms, AGC/noise suppression in the
-browser and different headset mics will change these numbers. Same-language
-listeners still hear any bleed in the *native* mic stream (the guard only
-affects what is sent to the AI). Frontend Krisp BVC (background voice
-cancellation) attacks the problem at the source but is a paid LiveKit Cloud
-feature beyond 100 min/month on the Build plan.
+- **Detect**: A ≥ 13 dB louder (window medians) AND envelope correlation
+  ≥ 0.90, **or** correlation ≥ 0.70 while B stays ≥ 14 dB under A's recent
+  peak in ≥ 95 % of its active bins (a leak never approaches its source's
+  level; reverb smears envelopes but not that bound). 3 consecutive hits.
+- **Sticky**: stays flagged while A is still ≥ 13 dB louder; releases after
+  6 misses (300 ms) once that dominance is gone.
+- **Own voice wins**: a frame within 10 dB of A's typical recent level and
+  ≥ 10 dB above B's leak level, for 80 ms (longer than network skew between
+  phones), is B talking → the flag is held off for 1.5 s so interjections
+  get through whole.
+- **Gate/chunks**: a 100 ms chunk is speech only if its own-speech frames
+  outnumber its leak frames; an open gate closes on a leak chunk instead of
+  forwarding it during the hangover.
+- **Second line** (`session.py`): output is dropped for 3 s after the
+  provider labels the input as already in the target language (safe on real
+  speech: the listener understands it). A broader "foreign label" rule was
+  tried and removed — Gemini's labels for leaked audio are unstable (a
+  speaker's own Polish was labelled 'en') and it dropped real translations.
+- **Web**: browser `autoGainControl` is off, so silence no longer pumps a
+  neighbour's leak up toward one's own level.
+
+Results (synthetic voices, synthetic room; live = deployed app + real Gemini):
+
+| Case | Before | After |
+|---|---|---|
+| Live, 2 people 1 m apart (−20 dB), 2 min | 42 s phantom, 6/6 translations | **0.0 s** in 4 runs, 6/6 |
+| Live, 3 people (ES/PL/EN) 1 m apart | — | 8/8 translations, 1.9 s of 0.3–0.7 s blips over 6 tracks |
+| Live, 2 people side by side (−12 dB, extreme) | — | 0.3–12 s per 2 min across 4 runs (leak ≈ a soft talker's level) |
+| Offline bench, leaked speech sent at −20 / −28 dB (of 79 s) | 38–57 s | 5.5 / 6.4 s |
+| Offline, soft interjection 6 / 12 dB quieter over a loud talker | — | 0.2 s of 8.9 s lost |
+| Unit tests | 0 false flags for independent speech at 0/−6/−12 dB (kept) | + burst arrival, soft interjection, gate, majority vote, same-language drop |
+
+Limitations: synthetic voices and rooms; real headset mics, phone noise
+suppression and Bluetooth will change the numbers — the two-phone test is the
+judge. Same-language listeners still hear any bleed in the *native* mic stream
+(the guard only affects what is sent to the AI). Practical advice: headset mic
+close to the mouth, people about 1 m apart; "Hold to talk" removes the
+problem entirely for someone who wants it. Krisp BVC (background voice
+cancellation) is a paid LiveKit Cloud feature beyond 100 min/month.
 
 ## Backlog control
 
@@ -168,6 +200,7 @@ feature beyond 100 min/month on the Build plan.
 | `BACKLOG_SOFT_MS` / `BACKLOG_HARD_MS` | 2500 / 6000 | Output delay bounds |
 | `SESSION_GRACE_SEC` | 10 | Keep a session warm after mute / last listener leaves |
 | `STREAM_KEEPALIVE_SEC` | 30 | Send 100 ms of silence after this long without input (Gemini idles out at 120 s); 0 disables |
+| `BLEED_GUARD` | true | Same-room leak guard (tunables `bleed_*` in `config.py`, chosen with `scripts/bleed_bench.py`) |
 | `IDLE_SHUTDOWN_SEC` | 30 | Job shutdown after the last human leaves |
 | `ADMISSION_FAIL_CLOSED_SEC` | 30 | Remove never-admitted humans if the control plane is down |
 | `USAGE_INTERVAL_SEC` | 15 | Usage report period |

@@ -1,5 +1,5 @@
 {
-  "date_utc": "2026-11-17T13:48:42Z",
+  "date_utc": "2026-11-17T14:57:06Z",
   "app_host": "eight-person-live-translator.vercel.app",
   "people": [
     "Ian speaks es, hears es",
@@ -10,10 +10,10 @@
   "publish_time_ratio": 1.0,
   "translations_expected": 6,
   "translations_heard": 6,
-  "all_began_before_speaker_stopped": true,
-  "first_audio_median_s": 2.19,
-  "first_audio_max_s": 3.72,
-  "phantom_total_s": 41.67,
+  "all_began_before_speaker_stopped": false,
+  "first_audio_median_s": 3.17,
+  "first_audio_max_s": 3.32,
+  "phantom_total_s": 0.0,
   "expected": [
     {
       "speaker": "Partner",
@@ -21,19 +21,19 @@
       "pair": "pl->es",
       "at_s": 40.0,
       "speech_s": 29.7,
-      "first_audio_s": 1.29,
+      "first_audio_s": 3.17,
       "began_before_speaker_stopped": true,
-      "heard_s": 24.8
+      "heard_s": 24.3
     },
     {
       "speaker": "Partner",
       "listener": "Ian",
       "pair": "pl->es",
       "at_s": 85.0,
-      "speech_s": 1.7,
-      "first_audio_s": 0.03,
-      "began_before_speaker_stopped": true,
-      "heard_s": 7.2
+      "speech_s": 2.1,
+      "first_audio_s": 2.32,
+      "began_before_speaker_stopped": false,
+      "heard_s": 1.9
     },
     {
       "speaker": "Partner",
@@ -41,9 +41,9 @@
       "pair": "pl->es",
       "at_s": 105.0,
       "speech_s": 11.7,
-      "first_audio_s": 1.32,
+      "first_audio_s": 1.4,
       "began_before_speaker_stopped": true,
-      "heard_s": 10.3
+      "heard_s": 11.2
     },
     {
       "speaker": "Ian",
@@ -51,9 +51,9 @@
       "pair": "es->pl",
       "at_s": 3.0,
       "speech_s": 29.7,
-      "first_audio_s": 3.43,
+      "first_audio_s": 3.23,
       "began_before_speaker_stopped": true,
-      "heard_s": 20.4
+      "heard_s": 20.7
     },
     {
       "speaker": "Ian",
@@ -61,9 +61,9 @@
       "pair": "es->pl",
       "at_s": 77.0,
       "speech_s": 19.7,
-      "first_audio_s": 3.72,
+      "first_audio_s": 3.17,
       "began_before_speaker_stopped": true,
-      "heard_s": 14.5
+      "heard_s": 14.7
     },
     {
       "speaker": "Ian",
@@ -71,9 +71,9 @@
       "pair": "es->pl",
       "at_s": 105.0,
       "speech_s": 11.7,
-      "first_audio_s": 3.06,
+      "first_audio_s": 3.32,
       "began_before_speaker_stopped": true,
-      "heard_s": 8.6
+      "heard_s": 9.3
     }
   ],
   "phantoms": [
@@ -81,14 +81,16 @@
       "track_of": "Partner",
       "heard_by": "Ian",
       "language": "es",
-      "phantom_s": 19.67,
+      "phantom_s": 0.0,
+      "phantom_at_s": [],
       "subscribed": true
     },
     {
       "track_of": "Ian",
       "heard_by": "Partner",
       "language": "pl",
-      "phantom_s": 22.0,
+      "phantom_s": 0.0,
+      "phantom_at_s": [],
       "subscribed": true
     }
   ],

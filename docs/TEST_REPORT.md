@@ -30,12 +30,12 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 
 | Suite | Command | Result |
 |---|---|---|
-| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **63 passed** |
+| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **65 passed** |
 | Type-check | `pnpm typecheck` | PASS |
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **100 passed**, 2 skipped (integration) — incl. 2 keepalive tests added 2026-11-17 |
+| Worker unit tests | `cd translator && uv run pytest` | **110 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed and same-language tests added 2026-11-17 |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -159,6 +159,42 @@ studio-like speech), one desktop on home internet as both "phones", no
 Bluetooth (adds its own buffering), no accuracy or voice-similarity scoring.
 Estimated provider cost of all testing on 2026-11-17, from the worker's price
 table: well under $1.
+
+### 5a. People in the same room (live simulation, 2026-11-17)
+
+`translator/scripts/table_sim.py` joins the deployed app as 2–3 people whose
+microphones also carry each other's voices (−12 to −20 dB, 3–7 ms delay,
+synthetic room reverb, −60 dBFS noise floor) and measures, on what each
+person would hear: expected translations and **phantom audio** (someone's
+track carrying audio while they were not talking = a neighbour's voice
+translated through the wrong person). Schedule: A talks 30 s, B 30 s, A 20 s
+with B's real Polish interjection "Co? Serio?" at 8 s, then both together 12 s.
+
+| Run (real Gemini, deployed worker) | Translations heard | Phantom audio | First audio median |
+|---|---|---|---|
+| ES/PL couple 1 m apart, **before** the fix | 6/6 | **41.7 s** (each heard their own words back) | 2.2 s |
+| ES/PL couple 1 m apart, after (4 runs) | 6/6 every run | **0.0 s every run** | 2.8–3.2 s |
+| ES/PL/EN, 3 people 1 m apart, after | 8/8 | 1.9 s total (0.3–0.7 s blips, 6 tracks) | 3.2 s |
+| ES/PL couple side by side (−12 dB), after (4 runs) | 6/6 | 0.3–12 s (varies with Gemini's labels) | 2.5–3.7 s |
+
+The interjection is translated while the main speaker is still talking; its
+"began before speaker stopped" is false only because a 2 s phrase is
+translated right after it ends. Fixes, root causes and offline bench numbers:
+`docs/architecture/WORKER.md` (Bleed guard). Raw results:
+`docs/results/2026-11-17-sim-*.json`.
+
+### 5b. Live screens with two simulated phones (2026-11-17)
+
+`pnpm exec playwright test -c playwright.prod.config.ts` drives the deployed
+app with two headless Chrome "phones" (390×844, fake microphones), using only
+what is on screen. **PASS** (32 s):
+
+- Start a gathering: no host-code field; Spanish/Argentina chosen; invite link has `#k=`.
+- Guest opens the link, picks Polski, "Check my headset" → mic level + "Record & play" shown, consent, "Join the table".
+- Both see each other; both mics on; guest's card for the host shows "translated".
+- First Polish caption on the guest's screen **5.0 s** after the host's mic turned on (includes fake-mic start and speech onset).
+- Private conversation "Outside": invite → "Join now" → both moved; guest "Leave & return to main" → host no longer visible to her.
+- No page errors. Gathering ended afterwards (HTTP 200).
 
 ## 6. Not run (needs your devices or reviewers)
 
