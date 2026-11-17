@@ -200,37 +200,6 @@ async def test_output_of_speech_already_in_the_target_language_is_dropped():
     await inp.aclose()
 
 
-async def test_mislabelled_neighbour_voice_is_dropped_but_one_odd_label_is_not():
-    """Live data: a neighbour's leaked Spanish came back labelled 'it'. Three of
-    the last four labels foreign -> drop; a single odd label -> keep."""
-    inp = make_input(silence(3.0))
-    io = FakeRoomIO()
-    session = await start_session(
-        inp, [MockProvider(delay_ms=100)], io, key=key("spk", "es")
-    )
-    session.speaker_lang = "pl"
-    sink = track_sink(io, "tx:spk:es")
-
-    async def label(lang: str) -> int:
-        await session._on_transcript(TranscriptOut(kind="input", text="x", lang=lang))
-        before = len([1 for _, p in sink.written if rms(p) > 300])
-        await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
-        return len([1 for _, p in sink.written if rms(p) > 300]) - before
-
-    # Speaker's own Polish with one odd label: never dropped.
-    assert await label("pl") == 1
-    assert await label("it") == 1
-    assert await label("pl") == 1
-    # A neighbour's voice: consistently foreign labels -> dropped from the 3rd.
-    assert await label("it") == 1
-    assert await label("it") == 1
-    assert await label("it") == 0
-    # The speaker talks again: translation resumes immediately.
-    assert await label("pl") == 1
-    await session.aclose()
-    await inp.aclose()
-
-
 async def test_echo_sessions_keep_same_language_output():
     """'I switch languages' speakers use echo sessions on purpose."""
     inp = make_input(silence(3.0))

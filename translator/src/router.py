@@ -561,15 +561,6 @@ class TranslationRouter:
 
             self._designate_source_captions()
             await self._reconcile_comparisons(desired)
-            # Sessions use the speaker's declared language to recognise a
-            # neighbour's voice by the provider's language labels; keep it
-            # current when someone changes language mid-gathering.
-            speak_of = {h.identity: h.speak_lang for h in humans}
-            for key, session in [
-                *self.sessions.items(),
-                *((ck[0], s) for ck, s in self.compare_sessions.items()),
-            ]:
-                session.speaker_lang = speak_of.get(key.speaker, "")
 
     def _echo_of(self, key: SessionKey) -> bool:
         s = self.sessions.get(key)
