@@ -49,6 +49,7 @@ export class FakeMediaAdmin implements MediaAdmin {
 export async function freshEnvironment(env: Record<string, string | undefined> = {}) {
   const defaults: Record<string, string | undefined> = {
     HOST_ACCESS_CODE: "host-code-123",
+    OPEN_GATHERING_CREATION: undefined,
     INTERNAL_API_SECRET: "internal-secret",
     APP_SECRET: "app-secret-for-tests",
     MAX_AI_SPEND_PER_GATHERING_USD: "50",

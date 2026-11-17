@@ -23,6 +23,7 @@ export async function GET() {
     livekit: getMediaAdmin().configured,
     internalApi: Boolean(config.internalApiSecret),
     hostCode: Boolean(config.hostAccessCode),
+    openCreation: config.openGatheringCreation,
     commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
   };
   return json(body, { status: database ? 200 : 503 });

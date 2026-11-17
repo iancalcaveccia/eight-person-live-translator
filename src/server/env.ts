@@ -55,6 +55,14 @@ export const config = {
   get hostAccessCode() {
     return str("HOST_ACCESS_CODE");
   },
+  /**
+   * "1" = anyone who can open the app may start a gathering, no host code
+   * (private/family deployments). Guests still need the invite link, and the
+   * per-gathering / monthly spending caps and the creation rate limit still apply.
+   */
+  get openGatheringCreation() {
+    return str("OPEN_GATHERING_CREATION") === "1";
+  },
   get cronSecret() {
     return str("CRON_SECRET");
   },

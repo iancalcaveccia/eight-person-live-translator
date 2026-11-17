@@ -274,12 +274,15 @@ export interface JoinResult {
 }
 
 export function hostCodeRequired(): boolean {
+  if (config.openGatheringCreation) return false;
   return Boolean(config.hostAccessCode) || isHostedDeployment();
 }
 
 export async function createGathering(input: CreateGatheringInput, ip: string): Promise<JoinResult> {
   const required = config.hostAccessCode;
-  if (required) {
+  if (config.openGatheringCreation) {
+    // Owner chose an open deployment: no code. Rate limit and caps below still apply.
+  } else if (required) {
     if (!input.hostCode || !safeEqual(input.hostCode, required)) {
       throw new ApiError(403, "bad_host_code", "That host access code is not correct");
     }

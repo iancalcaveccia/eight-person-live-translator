@@ -5,6 +5,7 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { POST as createGatheringRoute } from "@/app/api/gatherings/route";
+import { GET as configRoute } from "@/app/api/config/route";
 import { POST as joinRoute } from "@/app/api/gatherings/[gid]/join/route";
 import { GET as stateRoute } from "@/app/api/gatherings/[gid]/state/route";
 import { PATCH as meRoute } from "@/app/api/gatherings/[gid]/me/route";
@@ -118,6 +119,42 @@ describe("gathering creation and joining", () => {
     });
     expect(res.status).toBe(503);
     expect(res.body.error).toBe("host_code_not_configured");
+  });
+
+  it("lets anyone start a gathering without a code when OPEN_GATHERING_CREATION=1", async () => {
+    ({ admin, db } = await freshEnvironment({
+      HOST_ACCESS_CODE: undefined,
+      OPEN_GATHERING_CREATION: "1",
+      VERCEL: "1",
+      ALLOW_EMBEDDED_DB: "1",
+    }));
+    const cfg = await configRoute(new Request("http://localhost/api/config"));
+    expect((await cfg.json()).hostCodeRequired).toBe(false);
+
+    const c = new Client();
+    const res = await c.call(createGatheringRoute, {
+      body: { title: "Family", displayName: "Ian", consent: true, ...prefs("es") },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    // Guests still need the invite link; spending caps still apply.
+    const gid = res.body.gatheringId as string;
+    const stranger = new Client();
+    const denied = await stranger.call(joinRoute, {
+      params: { gid },
+      body: { inviteToken: "not-the-invite", displayName: "X", consent: true, ...prefs("en") },
+    });
+    expect(denied.status).toBe(403);
+    const rows = await db.query<{ budget_usd: string }>("select budget_usd from gatherings where id = $1", [gid]);
+    expect(Number(rows[0].budget_usd)).toBe(50);
+  });
+
+  it("open creation ignores a configured host code instead of demanding it", async () => {
+    ({ admin, db } = await freshEnvironment({ OPEN_GATHERING_CREATION: "1" }));
+    const c = new Client();
+    const res = await c.call(createGatheringRoute, {
+      body: { title: "Family", displayName: "Ian", consent: true, ...prefs("es") },
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
   });
 
   it("requires explicit AI-processing consent", async () => {
