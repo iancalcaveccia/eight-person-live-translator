@@ -258,6 +258,8 @@ screenshots each one and fails if anything sticks out sideways.
 |---|---|
 | Before (production `270a7ee`) | room screen **wider than the phone** at both sizes: status pill, invite text and the Settings button cut off; people count wrapped onto two lines; an empty grid row pushed the people cards to the bottom |
 | After (local production build) | **2 passed**, 21 + 20 screens, **0 overflow**; cards at the top, captions fill the rest, all five dock buttons fit at 360 px; 5+ people switch to three smaller cards per row; status moved under the table name so neither is cut |
+| After (production `1d0c770`, 2026-11-17 ~21:35 UTC) | **2 passed** (1.2 min), 41 screens, **0 overflow**, no page errors; the saved-table flow and the one-tap return work live; every test profile deleted afterwards (HTTP 200) |
+| Real translation through a saved table (production `1d0c770`, `walk.spec.ts`) | **PASS** (32 s): first Polish caption on the guest's screen **5.6 s** after the host's mic turned on, 148 caption characters 8 s later; private conversation and return to main OK; both profiles forgotten afterwards |
 | Saved table flow | start a table → its link → guest joins and is remembered → both go home → table shows who is there now → guest taps once → back in the same conversation; all test profiles deleted at the end |
 | Home-screen app | manifest + service worker were already present; added an install button (Android/Chrome) and iPhone instructions. **Installing on a real phone: NOT RUN** |
 | Microphone with the screen off | browsers stop a web page's microphone a few seconds after the screen turns off, installed or not (Chromium issue 374374232; galene issue 342, Oct 2026; Apple developer forums for iPhone). Pocket mode keeps the page in front with a black, touch-locked screen. **On a real phone: NOT RUN** |
@@ -279,11 +281,12 @@ screenshots each one and fails if anything sticks out sideways.
 |---|---|---|
 | Web app on Vercel `consultorios/eight-person-live-translator` | **Deployed and functional** | https://eight-person-live-translator.vercel.app, `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"commit":"64c86b9"}`; `/api/config` → `mediaConfigured:true, maxHumans:8, defaultProvider:gemini, perGatheringCapUsd:50`; functions in `fra1` |
 | Postgres | **Neon, eu-central-1**, connected via the Vercel integration | health `database:true`; gatherings created/joined/ended by the probe |
-| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `uQf4AVgJjxV4` (phone-offset alignment, `270a7ee`) deployed 2026-11-17 17:07 UTC; web `/api/health` → `commit 270a7ee` |
+| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `uQf4AVgJjxV4` (phone-offset alignment, `270a7ee`) deployed 2026-11-17 17:07 UTC (unchanged since) |
+| Web app update: saved tables, pocket mode, phone layout (`1d0c770`) | **Deployed 2026-11-17 ~21:32 UTC** | `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres",…,"openCreation":true,"commit":"1d0c770"}`; `/manifest.webmanifest` → `id "/"`, `standalone`, 3 icons; `/sw.js` 200; `/api/me` without a cookie → `{"person":null,…}`; migration `002_people_tables` applied on first request; section 5e runs |
 | Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
 | OpenAI key | not configured (optional backup) | — |
 | Open gathering creation (owner's choice, family use) | **On** since 2026-11-17: `OPEN_GATHERING_CREATION=1`, no host code needed to start a gathering; guests still need the invite link; $50/gathering and $200/month caps and the creation rate limit unchanged | live `/api/config` → `hostCodeRequired:false`; `/api/health` → `openCreation:true, commit e37cb35`; live `POST /api/gatherings` without a code → 201, then ended; live form shows no code field |
 | Earlier live checks (2026-10-30) | PASS | landing page 200 on a phone-sized viewport; security headers (HSTS, X-Frame-Options DENY, no-referrer, mic-only Permissions-Policy); uninvited `POST /api/gatherings/<id>/token` → **401** |
 
-Next: rows 1–6 of `docs/DEVICE_TEST_PLAN.md` on two real phones with
-Bluetooth headsets. Those are the only release gates still unverified.
+Next: rows 1–6 and 23–27 of `docs/DEVICE_TEST_PLAN.md` on two real phones
+with Bluetooth headsets. Those are the only release gates still unverified.
