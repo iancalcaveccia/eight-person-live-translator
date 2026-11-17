@@ -49,6 +49,9 @@ logger = logging.getLogger("translator.session")
 
 OUTPUT_SAMPLE_RATE = 24000
 HEALTHY_STREAM_SEC = 10.0
+# Input transcripts arrive about once a second; keep dropping output this long
+# after the last one that said "already in the target language".
+SAME_LANGUAGE_HOLD_SEC = 3.0
 
 
 @dataclass(frozen=True)
@@ -180,6 +183,9 @@ class TranslationSession:
         self._pending: deque[InputChunk] = deque()
         self._pending_ms = 0.0
         self._last_sent_ts = clock()  # last audio (or keepalive) sent upstream
+        self._same_lang_until = 0.0  # drop output until then (input = target lang)
+        self.same_language_segments = 0
+        self.same_language_dropped_sec = 0.0
         self._need_reconnect = asyncio.Event()
         self._closed = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -618,6 +624,10 @@ class TranslationSession:
     async def _on_audio(self, ev: AudioOut) -> None:
         assert self._sink is not None
         now = self._clock()
+        if now < self._same_lang_until:
+            self.meter.output_seconds += ev.duration_sec  # still billed upstream
+            self.same_language_dropped_sec += ev.duration_sec
+            return
         pcm = ev.pcm
         if ev.sample_rate != OUTPUT_SAMPLE_RATE:
             rs = self._out_resamplers.get(ev.sample_rate)
@@ -665,8 +675,31 @@ class TranslationSession:
             }
         )
 
+    def _note_input_language(self, ev: TranscriptOut) -> None:
+        """Second line of defence against same-room bleed.
+
+        If the provider says the speech it is hearing is ALREADY in this
+        session's target language, voicing it would only repeat it, and at a
+        shared table it is almost always a neighbour's voice leaking into this
+        mic (live test 2026-11-17: leaked, reverberant Spanish was labelled
+        'es'/'it' and re-voiced into Spanish, so the listener heard their own
+        words back; `echoTargetLanguage=false` alone did not stop it). Output is
+        dropped while such input continues. Never applied to echo sessions
+        ("I switch languages" speakers), where repeating is intended."""
+        if ev.kind != "input" or not ev.lang or self._echo:
+            return
+        heard = ev.lang.split("-")[0].lower()
+        if heard == self.key.target.split("-")[0].lower():
+            self._same_lang_until = self._clock() + SAME_LANGUAGE_HOLD_SEC
+            self.same_language_segments += 1
+        else:
+            self._same_lang_until = 0.0
+
     async def _on_transcript(self, ev: TranscriptOut) -> None:
+        self._note_input_language(ev)
         if not self._publish_captions:
+            return
+        if ev.kind == "output" and self._clock() < self._same_lang_until:
             return
         provider = self.provider.name
         self._captions.provider = provider

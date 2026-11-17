@@ -19,6 +19,7 @@ from helpers import (
 
 from audio import SpeakerInput, simple_resampler_factory
 from events import FakeRoomIO
+from providers.base import AudioOut, TranscriptOut
 from providers.mock import MockProvider
 from session import SessionKey, TranslationSession
 
@@ -170,6 +171,46 @@ async def test_keepalive_disabled_sends_nothing_during_silence():
     assert await wait_for(lambda: provider.streams, timeout=2)
     await asyncio.sleep(2.5)
     assert provider.streams[0].received_chunks == 0
+    await session.aclose()
+    await inp.aclose()
+
+
+def _loud(seconds: float = 0.2) -> bytes:
+    return speech_like(seconds, rate=24000, seed=5).tobytes()
+
+
+async def test_output_of_speech_already_in_the_target_language_is_dropped():
+    """A neighbour's Spanish leaking into a Polish speaker's mic, labelled 'es'
+    by the provider, must not be re-voiced to the Spanish listener."""
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, key=key("spk", "es")
+    )
+    sink = track_sink(io, "tx:spk:es")
+    await session._on_transcript(TranscriptOut(kind="input", text="x", lang="es"))
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert not any(rms(p) > 300 for _, p in sink.written)
+    assert session.same_language_dropped_sec > 0
+    # The speaker's own language comes back: translation flows again.
+    await session._on_transcript(TranscriptOut(kind="input", text="y", lang="pl-PL"))
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert any(rms(p) > 300 for _, p in sink.written)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_echo_sessions_keep_same_language_output():
+    """'I switch languages' speakers use echo sessions on purpose."""
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, key=key("spk", "es"), echo=True
+    )
+    sink = track_sink(io, "tx:spk:es")
+    await session._on_transcript(TranscriptOut(kind="input", text="x", lang="es"))
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert any(rms(p) > 300 for _, p in sink.written)
     await session.aclose()
     await inp.aclose()
 

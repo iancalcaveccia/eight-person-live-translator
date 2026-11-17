@@ -271,12 +271,20 @@ def analyse(people, spans, t0, wait_extra):
                 for t, db in series
                 if db > THR_DB and not any(a <= t <= b for a, b in busy)
             ]
+            segments: list[list[float]] = []
+            for t in sorted(loud):
+                rel = round(t - t0, 2)
+                if segments and rel - segments[-1][1] <= 0.5:
+                    segments[-1][1] = rel
+                else:
+                    segments.append([rel, rel])
             phantoms.append(
                 {
                     "track_of": spk.name,
                     "heard_by": lis.name,
                     "language": lis.listen,
                     "phantom_s": round(len(loud) / 100, 2),
+                    "phantom_at_s": [f"{a:.1f}-{b:.1f}" for a, b in segments],
                     "subscribed": name in lis.rx,
                 }
             )
