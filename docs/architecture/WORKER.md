@@ -199,6 +199,7 @@ switched off to stand in for real phones, where it caught nothing:
 | Loudness guard off, words check off | **157.9 s** | 9 | 8/8 |
 | Words check only (2 runs) | **3.7 s / 4.6 s** | 0 / 0 | 8/8 (interjection too) |
 | Both on (production) | **3.4 s** | 2 | 8/8 |
+| Deployed worker on LiveKit Cloud, via the live site (after the stale-flag fix) | **0.0 s** | 0 | 8/8 |
 
 The rest is the first 0.3–1.5 s of each overheard stretch, before three words
 can be compared. Runs where the PC could not publish in real time (ratio >

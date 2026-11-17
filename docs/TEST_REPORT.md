@@ -262,6 +262,16 @@ real time count (two overloaded runs, 1.14× and 1.21×, discarded).
 | Loudness guard off, same-words check off | **157.9 s** | 9 | 8/8 | 6.6 s |
 | Same-words check only, run A / B | **3.7 s / 4.6 s** | 0 / 0 | 8/8 / 8/8 (interjection included) | 4.0 / 4.2 s |
 | Both on (production setting) | **3.4 s** | 2 | 8/8 | 2.6 s |
+| **Deployed** worker `tP5XKFdqhEnK`, live site + LiveKit Cloud | 2.9 s | 2 | 8/8 | 3.0 s |
+| **Deployed** worker `iuvgXfV7t7x4` (stale-flag fix, 2026-11-17 ~23:05 UTC) | **0.0 s** | **0** | 8/8 | 3.4 s |
+
+The first deployed run's log showed a bug: the loudness guard's sticky flag
+was handed over while both mics were silent (~−68 dBFS), which set silence as
+the "overheard voice" level and blinded the check on one mic (0 s muted). Fixed
+in `9b16562` (hand-offs and loudness references need the other person clearly
+louder at that moment); after it, the log shows 30–61 s of overheard speech
+muted on each of the three mics. Raw data:
+`docs/results/2026-11-17-sim-three-lang-production*.json`.
 
 Getting there took four rounds, each found in the run before: judging every
 matching mic (two far mics matched each other better than the speaker),
@@ -304,7 +314,7 @@ screenshots each one and fails if anything sticks out sideways.
 |---|---|---|
 | Web app on Vercel `consultorios/eight-person-live-translator` | **Deployed and functional** | https://eight-person-live-translator.vercel.app, `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"commit":"64c86b9"}`; `/api/config` → `mediaConfigured:true, maxHumans:8, defaultProvider:gemini, perGatheringCapUsd:50`; functions in `fra1` |
 | Postgres | **Neon, eu-central-1**, connected via the Vercel integration | health `database:true`; gatherings created/joined/ended by the probe |
-| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `uQf4AVgJjxV4` (phone-offset alignment, `270a7ee`) deployed 2026-11-17 17:07 UTC (unchanged since) |
+| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `iuvgXfV7t7x4` (same-words check + stale-flag fix, `9b16562`) deployed 2026-11-17 23:01 UTC, status Running; verified with a live three-language run (section 5f) |
 | Web app update: saved tables, pocket mode, phone layout (`1d0c770`) | **Deployed 2026-11-17 ~21:32 UTC** | `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres",…,"openCreation":true,"commit":"1d0c770"}`; `/manifest.webmanifest` → `id "/"`, `standalone`, 3 icons; `/sw.js` 200; `/api/me` without a cookie → `{"person":null,…}`; migration `002_people_tables` applied on first request; section 5e runs |
 | Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
 | OpenAI key | not configured (optional backup) | — |
