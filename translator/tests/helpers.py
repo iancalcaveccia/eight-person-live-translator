@@ -69,6 +69,36 @@ def speech_like(
     return sig.astype(np.int16)
 
 
+def phrased_speech(
+    duration_s: float, *, rate: int = 48000, seed: int = 0, level: float = 0.3
+) -> np.ndarray:
+    """Closer to real talk than `speech_like`: phrases of 0.8-3 s separated by
+    pauses, syllables of varying length and loudness. Its envelope is not
+    quasi-periodic, so a misaligned comparison really fails (as it did with
+    real voices) instead of matching the next syllable by chance."""
+    rng = np.random.default_rng(seed)
+    n = int(duration_s * rate)
+    t = np.arange(n) / rate
+    f0 = 110 + 90 * rng.random()
+    vib = 1 + 0.04 * np.sin(2 * np.pi * 3 * t)
+    sig = np.zeros(n)
+    for h in range(1, 8):
+        sig += (1.0 / h) * np.sin(2 * np.pi * f0 * h * vib * t + rng.random() * 6.28)
+    env = np.zeros(n)
+    pos = int(rate * 0.2)
+    while pos < n:
+        phrase_end = pos + int(rate * (0.8 + 2.2 * rng.random()))
+        while pos < min(n, phrase_end):
+            end = min(n, pos + int(rate * (0.07 + 0.28 * rng.random())))
+            loud = 0.15 + 0.85 * rng.random()
+            env[pos:end] = loud * np.hanning(max(2, end - pos))[: end - pos]
+            pos = end + int(rate * (0.01 + 0.12 * rng.random()))
+        pos += int(rate * (0.25 + 0.65 * rng.random()))
+    sig = sig * env
+    sig = sig / (np.max(np.abs(sig)) + 1e-9) * level * 32767
+    return sig.astype(np.int16)
+
+
 def silence(
     duration_s: float, *, rate: int = 48000, noise: float = 30.0, seed: int = 1
 ) -> np.ndarray:

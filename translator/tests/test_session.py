@@ -200,6 +200,36 @@ async def test_output_of_speech_already_in_the_target_language_is_dropped():
     await inp.aclose()
 
 
+async def test_captions_that_went_out_before_the_language_label_are_retracted():
+    """Live two-phone test 2026-11-17: the re-voiced audio was dropped, but its
+    captions had already been shown under the wrong person's name."""
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp, [MockProvider(delay_ms=100)], io, key=key("spk", "es")
+    )
+    # Output text arrives first, the input's language label only afterwards.
+    await session._on_transcript(TranscriptOut(kind="output", text="hola, ¿qué"))
+    await session._on_transcript(TranscriptOut(kind="input", text="x", lang="es"))
+    # While held, further output text is not published at all.
+    await session._on_transcript(TranscriptOut(kind="output", text="tal?"))
+    await session._flush_outbox()
+    shown = [c for c in io.captions if c["kind"] == "translation"]
+    assert [c["text"] for c in shown if c["text"]] == ["hola, ¿qué"]
+    retract = [c for c in shown if c.get("retract") == "true"]
+    assert len(retract) == 1
+    assert retract[0]["seg"] == shown[0]["seg"]
+    assert retract[0]["final"] == "true"
+    # The next real translation starts a new segment.
+    await session._on_transcript(TranscriptOut(kind="input", text="y", lang="pl"))
+    await session._on_transcript(TranscriptOut(kind="output", text="bien"))
+    await session._flush_outbox()
+    last = [c for c in io.captions if c["kind"] == "translation"][-1]
+    assert last["text"] == "bien" and last["seg"] != shown[0]["seg"]
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_echo_sessions_keep_same_language_output():
     """'I switch languages' speakers use echo sessions on purpose."""
     inp = make_input(silence(3.0))

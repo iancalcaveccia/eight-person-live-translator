@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from helpers import FAST, frames_of, silence, speech_like
+from helpers import FAST, frames_of, phrased_speech, silence, speech_like
 
 from audio import (
     BacklogController,
@@ -184,11 +184,16 @@ def test_bleed_guard_never_flags_independent_speech(seed, db):
 
 
 def _run_pair(
-    a: np.ndarray, b: np.ndarray, *, b_skew_s: float = 0.06, burst: int = 1
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    b_skew_s: float = 0.06,
+    burst: int = 1,
+    guard: BleedGuard | None = None,
 ) -> list[tuple[int, bool]]:
     """Feed A and B like the worker does (B arrives later, frames in bursts of
     `burst`). Returns (frame index, flagged) for B's speech-like frames."""
-    guard = BleedGuard(enabled=True)
+    guard = guard or BleedGuard(enabled=True)
     ea, eb = _env(a), _env(b)
     events = []
     for i in range(len(ea)):
@@ -228,6 +233,54 @@ def test_soft_interjection_over_a_loud_speaker_still_gets_through(seed):
     flags = [f for i, f in _run_pair(a, b.astype(np.int16)) if 420 <= i < 550]
     assert flags
     assert sum(flags) / len(flags) < 0.1
+
+
+@pytest.mark.parametrize("seed", [41, 42, 43, 44, 45])
+@pytest.mark.parametrize("skew", [0.25, 0.4, -0.3])
+def test_bleed_guard_aligns_phones_that_deliver_audio_with_different_delays(seed, skew):
+    """Regression (first real two-phone test, 2026-11-17): Bluetooth headsets
+    and capture pipelines make one phone's stream arrive hundreds of ms after
+    the other's. With only the +/-120 ms window the leak went through (0-45 %
+    flagged on these signals)."""
+    a = phrased_speech(14.0, seed=seed)
+    guard = BleedGuard(enabled=True)
+    flags = _run_pair(a, _room_leak(a, 18, 5), b_skew_s=skew, guard=guard)
+    late = [f for i, f in flags if i > 700]  # once aligned (a few seconds)
+    assert late
+    assert sum(late) / len(late) > 0.95
+    measured = guard.offset_ms("B", "A")
+    assert measured is not None
+    # A's frame for the sound in B's bin t is at A-bin t - skew (the room's
+    # reverb delays the leak's envelope by a few ms more).
+    assert abs(measured + skew * 1000) <= 40
+
+
+@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("db", [0, 6, 12])
+@pytest.mark.parametrize("skew", [0.3, -0.3])
+def test_wide_alignment_search_never_flags_independent_speech(seed, db, skew):
+    """The wide search only measures alignment; a chance match between two
+    independent voices must not lock a pair or flag anything."""
+    a = phrased_speech(8.0, seed=10 + seed)
+    b = phrased_speech(8.0, seed=300 + 7 * seed + db, level=0.3 * 10 ** (-db / 20))
+    flags = [f for i, f in _run_pair(a, b, b_skew_s=skew) if i > 150]
+    assert flags
+    assert sum(flags) == 0
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_soft_interjection_gets_through_between_misaligned_phones(seed):
+    a = phrased_speech(8.0, seed=30 + seed)
+    own = np.zeros_like(a)
+    s, e = int(4.0 * 48000), int(5.5 * 48000)
+    own[s:e] = phrased_speech(1.5, seed=60 + seed, level=0.3 * 10 ** (-6 / 20))
+    b = (_room_leak(a, 20, seed).astype(np.int32) + own).clip(-32768, 32767)
+    flags = [
+        f for i, f in _run_pair(a, b.astype(np.int16), b_skew_s=0.3) if 420 <= i < 550
+    ]
+    assert flags
+    # Same as between well-aligned phones (0.00 / 0.12 / 0.08 at 60 ms skew).
+    assert sum(flags) / len(flags) < 0.15
 
 
 def test_gate_closes_on_bleed_instead_of_forwarding_it_during_hangover():

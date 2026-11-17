@@ -66,6 +66,7 @@ class Person:
         default_factory=lambda: rtc.AudioSource(RATE, 1, queue_size_ms=40)
     )
     rx: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    captions: list[dict] = field(default_factory=list)
     tasks: list[asyncio.Task] = field(default_factory=list)
     mic: np.ndarray | None = None
 
@@ -201,6 +202,25 @@ async def connect(person: Person, url: str) -> None:
         ):
             person.tasks.append(asyncio.create_task(listen(person, track, pub.name)))
 
+    def _caption(reader, _sender) -> None:
+        async def read() -> None:
+            text = await reader.read_all()
+            a = dict(reader.info.attributes or {})
+            person.captions.append(
+                {
+                    "t": time.monotonic(),
+                    "speaker": a.get("source_identity", ""),
+                    "kind": a.get("kind", ""),
+                    "target": a.get("target_lang", ""),
+                    "seg": a.get("seg", ""),
+                    "chars": len(text.strip()),
+                    "retract": a.get("retract") == "true",
+                }
+            )
+
+        person.tasks.append(asyncio.create_task(read()))
+
+    person.room.register_text_stream_handler("lk.translation", _caption)
     await person.room.connect(url, person.token)
     track = rtc.LocalAudioTrack.create_audio_track("microphone", person.source)
     await person.room.local_participant.publish_track(
@@ -278,6 +298,30 @@ def analyse(people, spans, t0, wait_extra):
                     segments[-1][1] = rel
                 else:
                     segments.append([rel, rel])
+            # Captions the listener's screen shows under spk's name while spk
+            # was not talking (what the first real test noticed), after the
+            # worker's retractions. Only counts are kept, never text.
+            caps: dict[str, dict] = {}
+            retracted: set[str] = set()
+            for c in lis.captions:
+                if not (
+                    c["speaker"] == spk.pid
+                    and c["kind"] == "translation"
+                    and c["target"] == lis.listen
+                ):
+                    continue
+                if c["retract"]:
+                    retracted.add(c["seg"])
+                    continue
+                seg = caps.setdefault(c["seg"], {"t": c["t"], "chars": 0})
+                seg["chars"] += c["chars"]
+            ghost = [
+                s
+                for k, s in caps.items()
+                if k not in retracted
+                and s["chars"] > 0
+                and not any(a <= s["t"] <= b for a, b in busy)
+            ]
             phantoms.append(
                 {
                     "track_of": spk.name,
@@ -285,6 +329,10 @@ def analyse(people, spans, t0, wait_extra):
                     "language": lis.listen,
                     "phantom_s": round(len(loud) / 100, 2),
                     "phantom_at_s": [f"{a:.1f}-{b:.1f}" for a, b in segments],
+                    "phantom_caption_segments": len(ghost),
+                    "phantom_caption_chars": sum(s["chars"] for s in ghost),
+                    "phantom_caption_at_s": [round(s["t"] - t0, 1) for s in ghost],
+                    "retracted_segments": len(retracted & set(caps)),
                     "subscribed": name in lis.rx,
                 }
             )
@@ -306,6 +354,19 @@ async def run(args) -> dict:
         )
     total = max(u.start + (u.length or len(clips[u.clip]) / RATE) for u in utts) + 2
     spans = build_mics(people, utts, clips, args.bleed_db, total)
+    # Phones deliver their mic streams with different delays (Bluetooth,
+    # capture pipeline): delay each person's whole mic signal by their skew.
+    skews = [float(x) for x in args.skew_ms.split(",")] if args.skew_ms else []
+    for idx, ms in enumerate(skews[: len(people)]):
+        k = int(RATE * ms / 1000)
+        if k <= 0:
+            continue
+        mic = people[idx].mic
+        people[idx].mic = np.concatenate([mic[:k], mic])[: len(mic)]
+        for s in spans:
+            if s["who"] == idx:
+                for f in ("start", "onset", "end"):
+                    s[f] += ms / 1000
 
     url, end = await join_all(args, people)
     try:
@@ -338,6 +399,7 @@ async def run(args) -> dict:
         "app_host": args.app_url.split("//")[-1].split("/")[0],
         "people": [f"{p.name} speaks {p.speak}, hears {p.listen}" for p in people],
         "bleed_db": args.bleed_db,
+        "phone_delay_ms": skews[: len(people)] if skews else None,
         "published_in_real_time": ratio <= 1.1,
         "publish_time_ratio": round(ratio, 2),
         "translations_expected": len(expected),
@@ -350,6 +412,9 @@ async def run(args) -> dict:
         "first_audio_median_s": round(float(np.median(firsts)), 2) if firsts else None,
         "first_audio_max_s": round(max(firsts), 2) if firsts else None,
         "phantom_total_s": round(sum(p["phantom_s"] for p in phantoms), 2),
+        "phantom_caption_segments_total": sum(
+            p["phantom_caption_segments"] for p in phantoms
+        ),
         "expected": expected,
         "phantoms": phantoms,
         "host": platform.platform(),
@@ -375,6 +440,11 @@ def main() -> None:
         help="person_index:clip_key:start_s[:length_s]",
     )
     p.add_argument("--bleed-db", type=float, default=-20.0)
+    p.add_argument(
+        "--skew-ms",
+        default="",
+        help="per-person extra mic delay in ms, e.g. 0,250 (phones differ)",
+    )
     p.add_argument("--out")
     args = p.parse_args()
     summary = asyncio.run(run(args))

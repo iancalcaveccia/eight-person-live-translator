@@ -115,6 +115,11 @@ class Settings:
     bleed_level_diff_db: float = 13.0
     bleed_window_ms: int = 1000
     bleed_max_lag_ms: int = 120
+    # Phones deliver their mic streams with different delays (Bluetooth,
+    # capture pipeline, jitter buffers). First real two-phone test 2026-11-17:
+    # the 120 ms window above missed the leak entirely; offline, a 200 ms
+    # offset let ~90 % of it through. Pairs are aligned within this range.
+    bleed_max_offset_ms: int = 600
     bleed_persist_evals: int = 3
     # Real-service simulation 2026-11-17 (2 people, ES/PL, reverberant room):
     # the 0.9 rule alone caught only ~70 % of evaluations and every miss let the
@@ -213,6 +218,7 @@ def load_settings() -> Settings:
         internal_api_secret=_env_str("INTERNAL_API_SECRET"),
         input_gate=_env_bool("INPUT_GATE", True),
         bleed_guard=_env_bool("BLEED_GUARD", True),
+        bleed_max_offset_ms=_env_int("BLEED_MAX_OFFSET_MS", 600),
         gemini_chunk_ms=_env_int("GEMINI_CHUNK_MS", 100),
         openai_chunk_ms=_env_int("OPENAI_CHUNK_MS", 100),
         gate_pre_roll_ms=_env_int("GATE_PRE_ROLL_MS", 600),

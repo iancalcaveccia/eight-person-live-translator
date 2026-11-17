@@ -25,6 +25,9 @@ export interface CaptionChunk {
   seg: string;
   final: boolean;
   text: string;
+  /** Withdraw segment `seg`: the worker found it was a neighbour's voice
+   *  leaking into this speaker's mic (CONTRACT 5.1). */
+  retract?: boolean;
 }
 
 const MAX_ENTRIES = 160;
@@ -49,6 +52,10 @@ export class CaptionStore {
     // (shown on demand as "original").
     if (c.kind === "translation" && c.targetLang !== this.listenLang) return;
     const key = `${c.speakerId}|${c.kind}|${c.seg}`;
+    if (c.retract) {
+      this.retract(key);
+      return;
+    }
     let entry = this.open.get(key);
     const text = c.text;
     if (!entry) {
@@ -78,6 +85,18 @@ export class CaptionStore {
       this.open.delete(key);
     }
     this.bump();
+  }
+
+  /** Remove the most recent entry for this speaker/kind/segment. */
+  private retract(key: string) {
+    this.open.delete(key);
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      if (this.entries[i].id.startsWith(`${key}|`)) {
+        this.entries.splice(i, 1);
+        this.bump();
+        return;
+      }
+    }
   }
 
   /** Close segments that went quiet (provider may not send a final marker). */

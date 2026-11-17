@@ -392,6 +392,7 @@ export class MediaSession {
             sourceLang: a.source_lang ?? "",
             seg: a.seg ?? "0",
             final: a.final === "true",
+            retract: a.retract === "true",
             text,
           });
         } catch {

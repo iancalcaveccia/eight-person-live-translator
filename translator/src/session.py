@@ -129,6 +129,23 @@ class CaptionPublisher:
         self._open = False
         self.seg += 1
 
+    def retract(self, within_sec: float) -> None:
+        """Withdraw the current segment, or the one that ended within
+        `within_sec`: its text turned out to be a neighbour's voice re-voiced
+        in the listener's own language (contract §5.1 `retract`)."""
+        if self._open:
+            target = self.seg
+            self._open = False
+            self.seg += 1
+        elif self.seg > 0 and self._clock() - self._last_ts <= within_sec:
+            target = self.seg - 1
+        else:
+            return
+        attrs = self._attrs(True)
+        attrs["seg"] = str(target)
+        attrs["retract"] = "true"
+        self._emit("", attrs)
+
     def tick(self) -> None:
         if self._open and self._clock() - self._last_ts >= self._gap:
             self.end_segment()
@@ -706,7 +723,13 @@ class TranslationSession:
         # (a neighbour's Polish came back as 'es', a speaker's own Polish as
         # 'en'), so it dropped real translations.
         if heard == self.key.target.split("-")[0].lower():
-            self._same_lang_until = self._clock() + SAME_LANGUAGE_HOLD_SEC
+            now = self._clock()
+            if now >= self._same_lang_until and self._publish_captions:
+                # Captions of this voice may have gone out before its language
+                # label arrived (live test 2026-11-17: the audio was dropped,
+                # but the text stayed on screen under the wrong name).
+                self._captions.retract(SAME_LANGUAGE_HOLD_SEC)
+            self._same_lang_until = now + SAME_LANGUAGE_HOLD_SEC
             self.same_language_segments += 1
         else:
             self._same_lang_until = 0.0

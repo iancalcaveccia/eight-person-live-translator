@@ -122,6 +122,7 @@ provider transcript chunk (append semantics). Attributes:
 | `final` | `"true"` closes the current utterance segment, `"false"` otherwise |
 | `seg` | decimal segment counter per `(speaker, target, kind)` |
 | `provider` | `gemini` \| `openai` \| `mock` |
+| `retract` | optional; `"true"` (empty text, `final="true"`) withdraws segment `seg`: the worker found its text was a neighbour's voice leaking into this speaker's mic, re-voiced in the listener's own language. Clients remove that caption. |
 
 Only **one** session per speaker publishes `kind=source` (the session whose
 target sorts first), to avoid duplicates. Captions are never persisted by

@@ -129,9 +129,21 @@ class BleedGuard:
     loud as A's own microphone (within `own_voice_margin_db`): a leak is always
     much quieter than its source, so that is B's own voice, e.g. an
     interjection over A.
+
+    Two phones deliver their streams with different delays (Bluetooth
+    headsets, capture pipelines, jitter buffers), often far more than
+    `max_lag_ms` (first real two-phone test, 2026-11-17: a neighbour's voice
+    got through; offline, a 200 ms offset let ~90 % of a leak through). So
+    each pair of streams is aligned first: confident matches (the strict rule)
+    are searched within +/- `max_offset_ms`, and once three agree, that pair is
+    compared around the measured offset with the +/- `max_lag_ms` tolerance.
     """
 
     BIN_MS = 10
+    ALIGN_VOTES = 5  # recent confident matches kept per pair
+    ALIGN_AGREE = 3  # how many must agree (within ALIGN_TOL bins) to lock
+    ALIGN_TOL = 2
+    VOTE_ACTIVE = 0.15  # min active share of a window to measure alignment
 
     def __init__(
         self,
@@ -141,6 +153,9 @@ class BleedGuard:
         level_diff_db: float = 13.0,
         window_ms: int = 1000,
         max_lag_ms: int = 120,
+        max_offset_ms: int = 600,
+        align_corr: float = 0.85,
+        align_vote_spacing_ms: int = 600,
         persist_evals: int = 3,
         active_dbfs: float = -50.0,
         floor_dbfs: float = -60.0,
@@ -160,6 +175,10 @@ class BleedGuard:
         self._diff = level_diff_db
         self._win = max(10, window_ms // self.BIN_MS)
         self._lag = max(0, max_lag_ms // self.BIN_MS)
+        self._off = max(self._lag, max_offset_ms // self.BIN_MS)
+        self._align_corr = align_corr
+        self._vote_spacing = max(0, align_vote_spacing_ms // self.BIN_MS)
+        self._last_vote_bin: dict[tuple[str, str], int] = {}
         self._persist = max(1, persist_evals)
         self._active = active_dbfs
         self._floor = floor_dbfs
@@ -170,7 +189,11 @@ class BleedGuard:
         self._release = max(1, release_evals)
         self._own_margin = own_voice_margin_db
         self._clock = clock
-        self._history = self._win + 2 * self._lag + 20
+        self._history = self._win + 2 * (self._off + self._lag) + 40
+        # Unordered pair (x, y), x < y -> v: the same sound is at y-bin
+        # x-bin + v (y's stream arrives v bins later than x's).
+        self._pair_offset: dict[tuple[str, str], int] = {}
+        self._pair_votes: dict[tuple[str, str], deque[int]] = {}
         self._env: dict[str, dict[int, float]] = {}
         self._last_eval_bin: dict[str, int] = {}
         self._cached: dict[str, bool] = {}
@@ -190,6 +213,18 @@ class BleedGuard:
         self.flag_count: dict[str, int] = {}
 
     def remove(self, speaker: str) -> None:
+        flagged = self.flag_count.pop(speaker, 0)
+        if self.enabled and speaker in self._env:
+            logger.info(
+                "bleed guard %s: %.1fs flagged as another person's voice",
+                speaker[:8],
+                flagged * self.BIN_MS / 1000,
+            )
+        for pair in [p for p in self._pair_offset if speaker in p]:
+            self._pair_offset.pop(pair, None)
+        for pair in [p for p in self._pair_votes if speaker in p]:
+            self._pair_votes.pop(pair, None)
+            self._last_vote_bin.pop(pair, None)
         self._env.pop(speaker, None)
         self._last_eval_bin.pop(speaker, None)
         self._cached.pop(speaker, None)
@@ -296,11 +331,64 @@ class BleedGuard:
             default=SILENCE_DBFS,
         )
 
+    # --- stream alignment ------------------------------------------------------
+
+    def _center(self, victim: str, source: str) -> int:
+        """c such that `source`'s frame for the sound at `victim`-bin t is at
+        source-bin t + c (0 until the pair is aligned)."""
+        x, y = (victim, source) if victim < source else (source, victim)
+        v = self._pair_offset.get((x, y), 0)
+        return v if x == victim else -v
+
+    def _vote(self, victim: str, source: str, c: int, now_bin: int) -> None:
+        x, y = (victim, source) if victim < source else (source, victim)
+        # Successive evaluations overlap almost entirely; space the votes so
+        # agreement means separate stretches of speech, not one chance match.
+        last = self._last_vote_bin.get((x, y))
+        if last is not None and 0 <= now_bin - last < self._vote_spacing:
+            return
+        self._last_vote_bin[(x, y)] = now_bin
+        v = c if x == victim else -c
+        votes = self._pair_votes.setdefault((x, y), deque(maxlen=self.ALIGN_VOTES))
+        votes.append(v)
+        if len(votes) < self.ALIGN_AGREE:
+            return
+        med = float(np.median(votes))
+        close = [u for u in votes if abs(u - med) <= self.ALIGN_TOL]
+        if len(close) < self.ALIGN_AGREE:
+            return
+        new = round(float(np.median(close)))
+        old = self._pair_offset.get((x, y))
+        if old is not None and abs(new - old) <= 1:
+            return  # keep it stable against +/-1 bin jitter
+        self._pair_offset[(x, y)] = new
+        logger.info(
+            "bleed alignment %s<->%s: %+d ms",
+            x[:8],
+            y[:8],
+            new * self.BIN_MS,
+        )
+
+    def offset_ms(self, victim: str, source: str) -> int | None:
+        """Measured stream offset for a pair (None until aligned); for logs/tests."""
+        x, y = (victim, source) if victim < source else (source, victim)
+        if (x, y) not in self._pair_offset:
+            return None
+        return self._center(victim, source) * self.BIN_MS
+
+    def _aligned_recent(self, source: str, speaker: str, now_bin: int) -> list[float]:
+        """`source`'s last 2*lag+1 frames aligned to `speaker`'s now_bin, using
+        only frames that have already arrived."""
+        c = self._center(speaker, source)
+        hi = min(now_bin + c, self._last_bin.get(source, now_bin + c))
+        env = self._env.get(source, {})
+        return [env.get(hi - i, SILENCE_DBFS) for i in range(0, 2 * self._lag + 1)]
+
     def _still_dominated(self, speaker: str, now_bin: int) -> bool:
         source = self._source.get(speaker)
         if source is None:
             return False
-        a = self._recent_peak(source, now_bin)
+        a = max(self._aligned_recent(source, speaker, now_bin))
         return (
             a > self._active and a - self._recent_peak(speaker, now_bin) >= self._diff
         )
@@ -322,73 +410,116 @@ class BleedGuard:
             return False
         # Compare with A's typical recent level (not its peak, which a softer
         # talker's syllables rarely reach): a leak sits ~20 dB below it.
-        a_env = self._env.get(source, {})
         recent = [
             v
-            for v in (a_env.get(now_bin - i) for i in range(0, 2 * self._lag + 1))
-            if v is not None and v > self._active
+            for v in self._aligned_recent(source, speaker, now_bin)
+            if v > self._active
         ]
         a_level = float(np.median(recent)) if recent else SILENCE_DBFS
         return b_now >= a_level - self._own_margin
 
     def _evaluate(self, speaker: str, now_bin: int) -> str | None:
         """Return the speaker whose voice leaks into `speaker`'s mic, if any."""
-        # Leave a margin for frames of other speakers that have not arrived yet.
-        end = now_bin - self._lag
-        start = end - self._win
-        b = self._series(speaker, start, self._win)
-        b_active = b[b > self._active]
-        if b_active.size < self._win * 0.3:
-            return None
-        b_level = float(np.median(b_active))
-        self._last_b_level = b_level
-        b_std = float(np.std(b))
-        if b_std < 1e-3:
-            return None
         for other in self._env:
             if other == speaker:
                 continue
-            a_ext = self._series(other, start - self._lag, self._win + 2 * self._lag)
-            a_core = a_ext[self._lag : self._lag + self._win]
-            a_active = a_core[a_core > self._active]
-            if a_active.size < self._win * 0.3:
-                continue
-            if float(np.median(a_active)) - b_level < self._diff:
-                continue
-            windows = np.lib.stride_tricks.sliding_window_view(
-                np.maximum(a_ext, self._floor), self._win
-            )
-            corr = _max_corr(np.maximum(b, self._floor), windows)
-            if corr >= self._corr:
-                return other
-            if corr < self._corr_relaxed:
-                continue
-            # Reverb smears the leaked envelope, so correlation alone misses
-            # fluent speech. Physics helps: a leak is never close to its
-            # source's level, so B stays `bound_margin_db` below A's recent
-            # peak (+/- lag) in nearly every active bin. B's own voice breaks
-            # that bound constantly.
-            a_peak = np.lib.stride_tricks.sliding_window_view(
-                a_ext, 2 * self._lag + 1
-            ).max(axis=1)[: self._win]
-            mask = b > self._active
-            bounded = float(np.mean(b[mask] <= a_peak[mask] - self._bound_margin))
-            if bounded >= self._bounded_ratio:
+            c = self._center(speaker, other)
+            # Around the pair's measured alignment, with the reverb tolerance.
+            hit, lag = self._match(speaker, other, now_bin, c, self._lag)
+            if lag is not None:
+                self._vote(speaker, other, lag, now_bin)
+            if not hit and self._off > self._lag:
+                # Discover (or re-measure) the alignment over the whole
+                # plausible offset range. This only measures: judging over
+                # such a wide range would match independent speech by chance.
+                _, lag = self._match(speaker, other, now_bin, 0, self._off, flag=False)
+                if lag is not None:
+                    self._vote(speaker, other, lag, now_bin)
+            if hit:
                 return other
         return None
 
+    def _match(
+        self,
+        speaker: str,
+        other: str,
+        now_bin: int,
+        c: int,
+        reach: int,
+        *,
+        flag: bool = True,
+    ) -> tuple[bool, int | None]:
+        """Is `other`'s voice in `speaker`'s mic, at source offset c +/- reach?
 
-def _max_corr(b: np.ndarray, windows: np.ndarray) -> float:
+        Returns (hit, offset in bins of the best match when it is good enough
+        to vote on the pair's alignment, else None). Votes need agreement
+        (ALIGN_AGREE within ALIGN_TOL bins) before they move the alignment.
+        With flag=False the call only measures (votes), it never flags."""
+        # End the window late enough that `other`'s matching frames (which
+        # may arrive later than ours) are already here.
+        a_last = self._last_bin.get(other, now_bin)
+        end = min(now_bin, a_last - c) - reach
+        start = end - self._win
+        b = self._series(speaker, start, self._win)
+        b_active = b[b > self._active]
+        # A sparse window (pauses) can still be measured, not judged.
+        if b_active.size < self._win * self.VOTE_ACTIVE:
+            return False, None
+        b_level = float(np.median(b_active))
+        if float(np.std(b)) < 1e-3:
+            return False, None
+        a_ext = self._series(other, start + c - reach, self._win + 2 * reach)
+        a_core = a_ext[reach : reach + self._win]
+        a_active = a_core[a_core > self._active]
+        if a_active.size < self._win * self.VOTE_ACTIVE:
+            return False, None
+        if float(np.median(a_active)) - b_level < self._diff:
+            return False, None
+        windows = np.lib.stride_tricks.sliding_window_view(
+            np.maximum(a_ext, self._floor), self._win
+        )
+        corrs = _corrs(np.maximum(b, self._floor), windows)
+        if corrs.size == 0:
+            return False, None
+        k = int(np.argmax(corrs))
+        corr = float(corrs[k])
+        vote = c + k - reach if corr >= self._align_corr else None
+        judged = min(b_active.size, a_active.size) >= self._win * 0.3
+        if not flag or not judged:
+            return False, vote
+        if corr >= self._corr:
+            self._last_b_level = b_level
+            return True, vote
+        if corr < self._corr_relaxed:
+            return False, vote
+        # Reverb smears the leaked envelope, so correlation alone misses
+        # fluent speech. Physics helps: a leak is never close to its
+        # source's level, so B stays `bound_margin_db` below A's recent
+        # peak (+/- lag around the alignment) in nearly every active bin.
+        # B's own voice breaks that bound constantly.
+        lo = reach - self._lag
+        a_peak = np.lib.stride_tricks.sliding_window_view(a_ext, 2 * self._lag + 1).max(
+            axis=1
+        )[lo : lo + self._win]
+        mask = b > self._active
+        bounded = float(np.mean(b[mask] <= a_peak[mask] - self._bound_margin))
+        if bounded >= self._bounded_ratio:
+            self._last_b_level = b_level
+            return True, vote
+        return False, vote
+
+
+def _corrs(b: np.ndarray, windows: np.ndarray) -> np.ndarray:
+    """Pearson correlation of `b` with each row of `windows`."""
     bc = b - b.mean()
     bn = float(np.sqrt(np.sum(bc * bc)))
     if bn < 1e-6:
-        return 0.0
+        return np.zeros(len(windows), dtype=np.float32)
     wc = windows - windows.mean(axis=1, keepdims=True)
     wn = np.sqrt(np.sum(wc * wc, axis=1))
     with np.errstate(divide="ignore", invalid="ignore"):
         c = (wc @ bc) / (wn * bn)
-    c = np.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
-    return float(c.max()) if c.size else 0.0
+    return np.nan_to_num(c, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 # --- Chunks, gate --------------------------------------------------------------

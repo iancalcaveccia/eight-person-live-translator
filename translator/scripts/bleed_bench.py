@@ -58,6 +58,7 @@ def make_guard(settings: Settings) -> BleedGuard:
         level_diff_db=settings.bleed_level_diff_db,
         window_ms=settings.bleed_window_ms,
         max_lag_ms=settings.bleed_max_lag_ms,
+        max_offset_ms=settings.bleed_max_offset_ms,
         persist_evals=settings.bleed_persist_evals,
         corr_relaxed=settings.bleed_corr_relaxed,
         bounded_ratio=settings.bleed_bounded_ratio,
