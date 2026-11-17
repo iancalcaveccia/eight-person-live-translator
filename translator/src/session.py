@@ -179,6 +179,7 @@ class TranslationSession:
         self._send_lock = asyncio.Lock()
         self._pending: deque[InputChunk] = deque()
         self._pending_ms = 0.0
+        self._last_sent_ts = clock()  # last audio (or keepalive) sent upstream
         self._need_reconnect = asyncio.Event()
         self._closed = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -495,6 +496,7 @@ class TranslationSession:
                     break
             self._pending_ms = 0.0
             self._current = stream
+            self._last_sent_ts = self._clock()  # a fresh stream restarts the idle timer
         task = asyncio.create_task(
             self._receive(stream), name=f"recv/{self.key.short()}"
         )
@@ -535,6 +537,7 @@ class TranslationSession:
             try:
                 await stream.send_audio(chunk.pcm)
                 self.meter.input_seconds += chunk.duration_sec
+                self._last_sent_ts = self._clock()
             except ProviderError as exc:
                 logger.debug("send failed %s: %s", self.key.short(), exc)
                 self._buffer_pending(chunk)
@@ -677,10 +680,35 @@ class TranslationSession:
         else:
             self._captions.text(ev.text)
 
+    async def _maybe_keepalive(self) -> None:
+        """Keep a quiet speaker's provider stream open.
+
+        Gemini closes a stream after 120 s without input ("client inactivity"),
+        and the input gate withholds silence, so without this a participant who
+        listens for a while would have their stream dropped and reopened every
+        two minutes, and their first words could land in the reconnect gap.
+        One silent chunk per `stream_keepalive_sec` prevents that."""
+        every = self._settings.stream_keepalive_sec
+        if every <= 0 or self._clock() - self._last_sent_ts < every:
+            return
+        prov = self.provider
+        samples = prov.input_sample_rate * prov.chunk_ms // 1000
+        async with self._send_lock:
+            stream = self._current
+            if stream is None:
+                return
+            try:
+                await stream.send_audio(b"\x00\x00" * samples)
+            except ProviderError:
+                return  # the receiver sees the close and reconnects
+            self.meter.input_seconds += prov.chunk_ms / 1000
+            self._last_sent_ts = self._clock()
+
     async def _ticker(self) -> None:
         """1 Hz housekeeping: caption segmentation and 'delayed' detection."""
         while not self._closed.is_set():
             await self._sleep(1.0)
+            await self._maybe_keepalive()
             if self._publish_captions:
                 self._captions.tick()
                 if self.publish_source:

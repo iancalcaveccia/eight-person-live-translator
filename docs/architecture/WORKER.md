@@ -69,6 +69,15 @@ silent:
   speech.
 - Only providers that allow it (Gemini, mock). OpenAI requires continuous
   audio, so it is never gated. **verified**
+- **Keepalive:** the real Gemini service closes a stream after exactly 120 s
+  without input (`1008 Session closed due to client inactivity`, measured
+  2026-11-17). Because the gate withholds silence, a quiet participant's
+  stream used to drop and reopen every two minutes, so their first words
+  could land in a ~0.5 s reconnect gap. Each session now sends 100 ms of
+  silence after `STREAM_KEEPALIVE_SEC` (30 s) without input; with a silent
+  chunk every 25 s the real service kept the stream open past 240 s.
+  Cost: ~0.3 % of a quiet speaker's time. **verified** (unit tests + real
+  service).
 - Not verified with the real Gemini service: whether long input pauses change
   model behaviour. Set `INPUT_GATE=false` to compare.
 
@@ -158,6 +167,7 @@ feature beyond 100 min/month on the Build plan.
 | `GATE_PRE_ROLL_MS` / `GATE_HANGOVER_MS` | 600 / 2500 | Input gate |
 | `BACKLOG_SOFT_MS` / `BACKLOG_HARD_MS` | 2500 / 6000 | Output delay bounds |
 | `SESSION_GRACE_SEC` | 10 | Keep a session warm after mute / last listener leaves |
+| `STREAM_KEEPALIVE_SEC` | 30 | Send 100 ms of silence after this long without input (Gemini idles out at 120 s); 0 disables |
 | `IDLE_SHUTDOWN_SEC` | 30 | Job shutdown after the last human leaves |
 | `ADMISSION_FAIL_CLOSED_SEC` | 30 | Remove never-admitted humans if the control plane is down |
 | `USAGE_INTERVAL_SEC` | 15 | Usage report period |

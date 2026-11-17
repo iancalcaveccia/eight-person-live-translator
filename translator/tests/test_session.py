@@ -136,6 +136,44 @@ async def test_overlapping_speakers_are_independent():
         await i.aclose()
 
 
+async def test_keepalive_keeps_a_quiet_speakers_stream_open():
+    """Gemini closes a stream after 120 s without audio, and the input gate
+    withholds silence. A quiet participant's stream must get a short silent
+    chunk every `stream_keepalive_sec` instead of dropping and reconnecting."""
+    settings = fast(stream_keepalive_sec=1.0)
+    inp = make_input(silence(5.0), settings=settings)
+    io = FakeRoomIO()
+    provider = MockProvider(delay_ms=100)
+    session = await start_session(inp, [provider], io, settings=settings)
+    inp.start()
+    assert await wait_for(lambda: provider.streams, timeout=2)
+    stream = provider.streams[0]
+    assert await wait_for(lambda: stream.received_chunks >= 2, timeout=6)
+    # Only keepalives were sent: about one 50 ms chunk per second, all silent.
+    assert stream.received_chunks <= 6
+    assert stream.received_seconds == pytest.approx(
+        stream.received_chunks * 0.05, abs=1e-6
+    )
+    assert provider.connect_calls == 1
+    assert session.meter.input_seconds == pytest.approx(stream.received_seconds)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_keepalive_disabled_sends_nothing_during_silence():
+    settings = fast(stream_keepalive_sec=0.0)
+    inp = make_input(silence(3.0), settings=settings)
+    io = FakeRoomIO()
+    provider = MockProvider(delay_ms=100)
+    session = await start_session(inp, [provider], io, settings=settings)
+    inp.start()
+    assert await wait_for(lambda: provider.streams, timeout=2)
+    await asyncio.sleep(2.5)
+    assert provider.streams[0].received_chunks == 0
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_reconnects_after_provider_drop_and_keeps_streaming():
     speech = speech_like(4.0, seed=3)
     inp = make_input(speech)

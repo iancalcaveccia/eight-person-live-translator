@@ -136,6 +136,11 @@ class Settings:
         30.0,
     )
     reconnect_replay_ms: int = 2000
+    # Gemini closes a stream after 120 s without audio (measured 2026-11-17:
+    # "1008 Session closed due to client inactivity"). The input gate withholds
+    # silence, so send one silent chunk after this many seconds without input.
+    # 0 disables. ~0.3 % of a quiet speaker's time is sent (and billed).
+    stream_keepalive_sec: float = 30.0
     provider_failures_before_fallback: int = 3
     connect_timeout_sec: float = 10.0
     rotation_drain_sec: float = 3.0
@@ -202,6 +207,7 @@ def load_settings() -> Settings:
         backlog_soft_ms=_env_int("BACKLOG_SOFT_MS", 2500),
         backlog_hard_ms=_env_int("BACKLOG_HARD_MS", 6000),
         session_grace_sec=_env_float("SESSION_GRACE_SEC", 10.0),
+        stream_keepalive_sec=_env_float("STREAM_KEEPALIVE_SEC", 30.0),
         idle_shutdown_sec=_env_float("IDLE_SHUTDOWN_SEC", 30.0),
         admission_fail_closed_sec=_env_float("ADMISSION_FAIL_CLOSED_SEC", 30.0),
         usage_interval_sec=_env_float("USAGE_INTERVAL_SEC", 15.0),
