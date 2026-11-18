@@ -267,6 +267,13 @@ time (×1.01 / ×1.05), 16/16 translations heard each.
 | Setup rejected | — | no (accepted by `gemini-3.5-live-translate-preview`) |
 | First audio median | 3.26 s | 3.34 s |
 
+**Live** (worker `oH4SoZm2dgcL`, commit `61c1c15`, 2026-11-18): the same
+exchange through the production site with display names "Ian Luca" / "Ola",
+3 cycles: name exact **6/6**, 6/6 translations heard, 0.3 s re-voiced. (Same
+script before, with names "Ian"/"Partner": "Gianluca", "Ian Luka".) The
+privacy-page sentence about names is committed but **not yet on the live
+site**: the Vercel CLI login on this PC expired.
+
 If Gemini ever rejects the card, the worker drops it for good and connects
 without it (`test_a_rejected_names_card_is_dropped_never_costing_a_translation`).
 
