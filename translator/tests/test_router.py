@@ -84,6 +84,37 @@ async def test_eight_people_three_languages_sixteen_shared_sessions():
     await h.close()
 
 
+async def test_names_card_names_the_speaker_and_the_table_unless_switched_off():
+    people = [
+        human("ian", "es", "es", name="Ian Luca"),
+        human("ola", "pl", "pl", name="Ola"),
+    ]
+    mock = MockProvider(delay_ms=200)
+    h = Harness(
+        people,
+        providers={"mock": mock},
+        settings=fast(translation_provider="mock", context_card=False),
+    )
+    h.router.start()
+    assert await wait_for(lambda: mock.connect_calls >= 2, timeout=5)
+    assert mock.last_context is None  # GEMINI_CONTEXT_CARD=0
+    await h.close()
+
+    mock = MockProvider(delay_ms=200)
+    h = Harness(
+        people,
+        providers={"mock": mock},
+        settings=fast(translation_provider="mock", context_card=True),
+    )
+    h.router.start()
+    assert await wait_for(lambda: mock.connect_calls >= 2, timeout=5)
+    card = h.router._context_card("ian")
+    assert "The person speaking is Ian Luca." in card
+    assert "Ian Luca, Ola" in card
+    assert mock.last_context and "People at the table" in mock.last_context
+    await h.close()
+
+
 async def test_one_english_speaker_three_spanish_listeners_single_session():
     people = [human("en", "en", "en")] + [
         human(f"es{i}", "es", "es", muted=True) for i in range(3)

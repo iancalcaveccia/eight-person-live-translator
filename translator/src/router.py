@@ -307,6 +307,7 @@ class TranslationRouter:
         self.shutdown_reason: str | None = None
         self._diag_events: list[dict[str, Any]] = []
         self._declared: dict[str, str] = {}
+        self._names: dict[str, str] = {}  # identity -> display name (names card)
 
         self.bleed_guard = BleedGuard(
             enabled=settings.bleed_guard,
@@ -515,7 +516,31 @@ class TranslationRouter:
             info = parse_human(p.identity, p.attributes, has_mic=has_mic)
             if info is not None:
                 out.append(info)
+                name = (getattr(p, "name", "") or "").strip()
+                if name:
+                    self._names[p.identity] = name[:40]
         return out
+
+    def _context_card(self, speaker: str) -> str | None:
+        """Names card for a new provider stream (GEMINI_CONTEXT_CARD): who is
+        speaking and the names at the table, so a fresh stream does not have
+        to guess them from the audio ("Iga" for "Ian" in the 30-min run)."""
+        if not self._settings.context_card:
+            return None
+        here = {h.identity for h in self.admitted_humans()}
+        names = [n for i, n in self._names.items() if i in here]
+        if not names:
+            return None
+        who = self._names.get(speaker)
+        card = "Background for this live interpretation; never say or translate this note. "
+        if who:
+            card += f"The person speaking is {who}. "
+        card += (
+            "People at the table: "
+            + ", ".join(names)
+            + ". These are personal names: when they are spoken, keep them exactly as written."
+        )
+        return card
 
     # --- reconciliation -------------------------------------------------------------
 
@@ -594,6 +619,7 @@ class TranslationRouter:
                     crosstalk=self.crosstalk,
                     diag=self._diag,
                     speak_lang=self._declared.get(key.speaker, ""),
+                    context=lambda spk=key.speaker: self._context_card(spk),
                     resampler_factory=self._resampler_factory,
                 )
                 self.sessions[key] = session

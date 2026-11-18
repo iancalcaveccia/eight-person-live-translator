@@ -89,6 +89,7 @@ def build_setup_payload(
     echo_target: bool,
     layout: str,
     activity: dict[str, Any] | None = None,
+    context: str | None = None,
 ) -> dict[str, Any]:
     generation_config: dict[str, Any] = {
         "responseModalities": ["AUDIO"],
@@ -106,6 +107,10 @@ def build_setup_payload(
         "generationConfig": generation_config,
         "realtimeInputConfig": {"automaticActivityDetection": detection},
     }
+    if context:
+        # Names card (GEMINI_CONTEXT_CARD). Google's pages disagree on whether
+        # Live Translate honours a system instruction; measured, not assumed.
+        setup["systemInstruction"] = {"parts": [{"text": context}]}
     if layout == LAYOUT_GENERATION_CONFIG:
         generation_config["inputAudioTranscription"] = {}
         generation_config["outputAudioTranscription"] = {}
@@ -286,6 +291,7 @@ class GeminiProvider(TranslationProvider):
         self._api_key = api_key
         self._model = model
         self._activity = activity or None
+        self._context_rejected = False
         self._url = url
         self._timeout = connect_timeout_sec
         self._connector = connector or websockets.connect
@@ -299,12 +305,35 @@ class GeminiProvider(TranslationProvider):
             supported_targets=GEMINI_TARGETS,
         )
 
-    async def connect(self, *, target_lang: str, echo_target: bool) -> ProviderStream:
+    async def connect(
+        self, *, target_lang: str, echo_target: bool, context: str | None = None
+    ) -> ProviderStream:
         if not self.supports(target_lang):
             raise ProviderError(
                 f"gemini does not support target {target_lang}", retryable=False
             )
+        if context and not self._context_rejected:
+            try:
+                return await self._connect(target_lang, echo_target, context)
+            except SetupRejectedError as exc:
+                # Never let the optional card cost a translation: drop it for
+                # this worker and connect as before.
+                self._context_rejected = True
+                logger.warning(
+                    "gemini rejected the context card (%s); not sent again", exc
+                )
+        return await self._connect(target_lang, echo_target, None)
+
+    async def _connect(
+        self, target_lang: str, echo_target: bool, context: str | None
+    ) -> ProviderStream:
         layout = self._layout.current
+        if context:
+            # Only the layout already known to work: a rejection here must be
+            # about the card, not trigger the layout fallback.
+            return await self._connect_with_layout(
+                target_lang, echo_target, layout, context
+            )
         try:
             return await self._connect_with_layout(target_lang, echo_target, layout)
         except SetupRejectedError as exc:
@@ -329,7 +358,11 @@ class GeminiProvider(TranslationProvider):
                 ) from exc2
 
     async def _connect_with_layout(
-        self, target_lang: str, echo_target: bool, layout: str
+        self,
+        target_lang: str,
+        echo_target: bool,
+        layout: str,
+        context: str | None = None,
     ) -> ProviderStream:
         payload = build_setup_payload(
             model=self._model,
@@ -337,6 +370,7 @@ class GeminiProvider(TranslationProvider):
             echo_target=echo_target,
             layout=layout,
             activity=self._activity,
+            context=context,
         )
         try:
             ws = await asyncio.wait_for(

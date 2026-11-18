@@ -247,6 +247,12 @@ session's log: Polish heard 58× on the Spanish speaker's mic).
   pause (speaker quiet, nothing being voiced or queued), the session opens a
   new stream before closing the old one — no gap. A stream older than that
   in a non-stop monologue still rotates when the provider asks (GoAway).
+- **Names card** (`GEMINI_CONTEXT_CARD`, default on): every new stream's
+  setup carries a system instruction with the speaker's and the table's
+  display names. A fresh stream otherwise guesses names from the audio
+  (30-min run: "Iga" for Ian). Measured 16/16 vs 2/16 exact names (TEST_REPORT
+  5h). Rejected once → dropped for the worker's lifetime, never blocking a
+  connection. Display names go to Google only inside the existing stream.
 - **Stuck streams** (`STALL_ROTATE_SEC`, default 8): field reports (2026)
   describe Live Translate streams that stay open but go silent for 8–51 s.
   When the provider keeps transcribing the speaker in another language than

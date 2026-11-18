@@ -128,9 +128,13 @@ class TranslationProvider(abc.ABC):
         return self.capabilities.supports(target_lang)
 
     @abc.abstractmethod
-    async def connect(self, *, target_lang: str, echo_target: bool) -> ProviderStream:
+    async def connect(
+        self, *, target_lang: str, echo_target: bool, context: str | None = None
+    ) -> ProviderStream:
         """Open a stream and return once the provider is ready for audio.
 
+        `context`: optional short note for the stream (who is talking, the
+        names at the table); providers without a way to pass it ignore it.
         Raises ProviderError (or SetupRejectedError) on failure."""
 
 

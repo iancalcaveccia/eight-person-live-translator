@@ -246,6 +246,44 @@ async def test_layout_fallback_is_automatic_and_remembered():
     )  # rejected, fallback, then directly the remembered layout
 
 
+async def test_names_card_goes_in_the_setup_as_a_system_instruction():
+    card = "The person speaking is Ian Luca. People at the table: Ian Luca, Ola."
+    async with FakeGemini() as fake:
+        stream = await provider(fake).connect(
+            target_lang="pl", echo_target=False, context=card
+        )
+        await stream.aclose()
+    assert fake.setups[0]["setup"]["systemInstruction"] == {"parts": [{"text": card}]}
+
+
+async def test_a_rejected_names_card_is_dropped_never_costing_a_translation():
+    class RejectCard(FakeGemini):
+        async def handler(self, ws):
+            first = await ws.recv()
+            if "systemInstruction" in json.loads(first)["setup"]:
+                self.connections += 1
+                self.setups.append(json.loads(first))
+                await ws.close(1007, "Unknown name systemInstruction")
+                return
+            # Not a card: replay the normal handshake for the parent handler.
+            self.connections += 1
+            self.setups.append(json.loads(first))
+            await ws.send(json.dumps({"setupComplete": {}}))
+            with contextlib.suppress(Exception):
+                async for _ in ws:
+                    pass
+
+    async with RejectCard() as fake:
+        p = provider(fake)
+        s1 = await p.connect(target_lang="pl", echo_target=False, context="names")
+        await s1.aclose()
+        s2 = await p.connect(target_lang="pl", echo_target=False, context="names")
+        await s2.aclose()
+    with_card = ["systemInstruction" in s["setup"] for s in fake.setups]
+    assert with_card == [True, False, False]  # tried once, then never again
+    assert p._layout.current == LAYOUT_SETUP  # the card did not flip the layout
+
+
 async def test_both_layouts_rejected_is_fatal():
     class RejectAll(FakeGemini):
         async def handler(self, ws):

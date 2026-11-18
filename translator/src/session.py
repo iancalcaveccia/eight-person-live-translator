@@ -192,6 +192,7 @@ class TranslationSession:
         crosstalk: CrossTalkDetector | None = None,
         diag: Callable[..., None] | None = None,
         speak_lang: str = "",
+        context: Callable[[], str | None] | None = None,
         resampler_factory: Callable[[int, int], Any] = default_resampler_factory,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Any] = asyncio.sleep,
@@ -199,6 +200,8 @@ class TranslationSession:
         if not providers:
             raise ValueError("at least one provider is required")
         self.key = key
+        # Names card, rebuilt at every new stream (people join and leave).
+        self._context_fn = context
         self._input = speaker_input
         self._providers = providers
         self._provider_idx = 0
@@ -585,7 +588,9 @@ class TranslationSession:
             first = False
             try:
                 stream = await prov.connect(
-                    target_lang=self.key.target, echo_target=self._echo
+                    target_lang=self.key.target,
+                    echo_target=self._echo,
+                    context=self._context(),
                 )
             except ProviderError as exc:
                 self.meter.errors += 1
@@ -781,6 +786,15 @@ class TranslationSession:
         elif stream is not self._current:
             await self._drop_stream(stream)
 
+    def _context(self) -> str | None:
+        if self._context_fn is None:
+            return None
+        try:
+            return self._context_fn()
+        except Exception:  # pragma: no cover - the card is optional
+            logger.debug("context card failed", exc_info=True)
+            return None
+
     def _at_a_pause(self, now: float) -> bool:
         """The speaker is quiet and the provider has finished voicing.
 
@@ -912,7 +926,9 @@ class TranslationSession:
         try:
             try:
                 new = await self.provider.connect(
-                    target_lang=self.key.target, echo_target=self._echo
+                    target_lang=self.key.target,
+                    echo_target=self._echo,
+                    context=self._context(),
                 )
             except ProviderError as exc:
                 logger.warning("rotation connect failed %s: %s", self.key.short(), exc)

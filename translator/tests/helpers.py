@@ -166,6 +166,7 @@ class FakeParticipant:
     attributes: dict[str, str]
     kind: int = rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
     track_publications: dict[str, FakePub] = field(default_factory=dict)
+    name: str = ""
 
 
 def human(
@@ -176,9 +177,11 @@ def human(
     epoch: str = "1",
     mic: bool = True,
     muted: bool = False,
+    name: str = "",
 ) -> FakeParticipant:
     p = FakeParticipant(
         identity=identity,
+        name=name,
         attributes={
             "speak_lang": speak,
             "listen_lang": listen,

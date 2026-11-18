@@ -310,6 +310,7 @@ Worker (`translator/.env.local`, LiveKit Cloud secrets):
 | `BLEED_GUARD` | no | `true` |
 | `CROSSTALK_GUARD` | no | `true` (same words on two mics; see WORKER.md) |
 | `STREAM_REFRESH_SEC` | no | `300` (fresh provider stream at a pause; 0 = only when the provider asks) |
+| `GEMINI_CONTEXT_CARD` | no | `1` (names card: speaker and table names sent as a system instruction with each new Gemini stream; 0 = off) |
 | `STALL_ROTATE_SEC` | no | `8` (fresh stream when the provider hears foreign speech but returns nothing this long; 0 = off) |
 | `GEMINI_VAD_START` / `GEMINI_VAD_END` / `GEMINI_VAD_SILENCE_MS` / `GEMINI_VAD_PREFIX_MS` | no | unset (Gemini speech-detection tuning; only after a local test) |
 

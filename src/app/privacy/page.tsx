@@ -17,7 +17,8 @@ export default function PrivacyPage() {
             Your phone sends your microphone audio over an encrypted WebRTC connection to <strong>LiveKit Cloud</strong>,
             which delivers it to the other people in your current conversation and to the interpreter service. The
             interpreter streams it to <strong>Google Gemini Live Translate</strong> (and, if the gathering uses it as a
-            backup, <strong>OpenAI</strong>) and sends back translated speech and captions. Those providers process
+            backup, <strong>OpenAI</strong>) and sends back translated speech and captions. So that names come out
+            right, the interpreter also tells Google the display names of the people in your conversation. Those providers process
             the audio under their own API terms; Google&apos;s and OpenAI&apos;s paid APIs state that API data is not
             used to train their models, but they may process it outside the EU.
           </p>

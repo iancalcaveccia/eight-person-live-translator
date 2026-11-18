@@ -212,7 +212,9 @@ class OpenAITranslateProvider(TranslationProvider):
             supported_targets=OPENAI_TARGETS,
         )
 
-    async def connect(self, *, target_lang: str, echo_target: bool) -> ProviderStream:
+    async def connect(
+        self, *, target_lang: str, echo_target: bool, context: str | None = None
+    ) -> ProviderStream:
         # echo_target has no equivalent on this API; the model may stay silent
         # for speech already in the output language.
         if not self.supports(target_lang):

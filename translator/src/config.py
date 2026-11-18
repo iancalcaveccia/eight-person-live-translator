@@ -178,6 +178,11 @@ class Settings:
     # for 8 to 51 s. If the provider keeps transcribing foreign speech and nothing
     # comes back for this long, switch to a fresh stream. 0 disables.
     stall_rotate_sec: float = 8.0
+    # Names card sent with every new Gemini stream (who speaks, the names at
+    # the table). Real-Gemini run 2026-11-18, 16 fresh streams each: the
+    # speaker's name came out exactly right 16/16 with it, 2/16 without
+    # ("Gianluca", "Ian Luka"); never voiced; other facts unchanged.
+    context_card: bool = True
     provider_failures_before_fallback: int = 3
     connect_timeout_sec: float = 10.0
     rotation_drain_sec: float = 3.0
@@ -252,6 +257,7 @@ def load_settings() -> Settings:
         stream_keepalive_sec=_env_float("STREAM_KEEPALIVE_SEC", 30.0),
         stream_refresh_sec=_env_float("STREAM_REFRESH_SEC", 300.0),
         stall_rotate_sec=_env_float("STALL_ROTATE_SEC", 8.0),
+        context_card=_env_bool("GEMINI_CONTEXT_CARD", True),
         idle_shutdown_sec=_env_float("IDLE_SHUTDOWN_SEC", 30.0),
         admission_fail_closed_sec=_env_float("ADMISSION_FAIL_CLOSED_SEC", 30.0),
         usage_interval_sec=_env_float("USAGE_INTERVAL_SEC", 15.0),

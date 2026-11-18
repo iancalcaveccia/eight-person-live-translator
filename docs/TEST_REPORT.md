@@ -39,7 +39,7 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **203 passed**, 2 skipped (integration), 2026-11-18 — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests, 32 for the same-words (cross-talk) check added 2026-11-17 (every rule mutation-checked: removing it fails a test), and the long-session pieces: overheard input withheld from the provider, stream refresh only at a pause, per-minute numbers that survive usage reports and 200+ utterances, stuck-stream recovery, GoAway switch at a pause, pauses judged by words not faint noise |
+| Worker unit tests | `cd translator && uv run pytest` | **206 passed**, 2 skipped (integration), 2026-11-18 — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests, 32 for the same-words (cross-talk) check added 2026-11-17 (every rule mutation-checked: removing it fails a test), and the long-session pieces: overheard input withheld from the provider, stream refresh only at a pause, per-minute numbers that survive usage reports and 200+ utterances, stuck-stream recovery, GoAway switch at a pause, pauses judged by words not faint noise |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -247,6 +247,28 @@ the session finished and asked for a review; no specific problem was reported.
 | Bleed guard (loudness-pattern match) | flagged **0.0 s** on both mics. Likely reason: room reverb, browser noise suppression and the headsets' own processing reshape the far voice, so its loudness pattern no longer matches the near one (the simulator's synthetic leak does not model this) |
 | Same-language rule | dropped **95 s** (owner's mic) + **63 s** (partner's mic) of picked-up speech instead of re-voicing it; since `270a7ee` the captions of those stretches are retracted |
 | Consequence | For two people with two different languages the language rule covers the leak. A table with three languages needed a better signal than loudness → the same-words check, section 5f |
+
+### 5h. Names card for every new stream (2026-11-18, local stack + real Gemini)
+
+Each new Gemini stream now gets a short system instruction: who is speaking
+and the names at the table, "keep them exactly as written" (`router._context_card`,
+`GEMINI_CONTEXT_CARD`, default on). Google's pages disagree on whether Live
+Translate honours a system instruction, so it was measured: `locallong`
+(the 5g exchange, display names "Ian Luca" and "Ola", 8 cycles, a fresh stream
+every 60 s so 16 fresh streams per run), card off vs on, both runs in real
+time (×1.01 / ×1.05), 16/16 translations heard each.
+
+| | Card off | Card on |
+|---|---|---|
+| Name exactly "Ian Luca" | **2/16** ("Gianluca" ×8 in Polish, "Ian Luka" ×5, "Ian" ×1) | **16/16** |
+| Facts right | 98–100% | 96–99% |
+| Known errors per cycle | 0.50 | 0.75 (all "Hola. Hola," at the start, also seen without the card) |
+| Card text voiced or captioned | — | never; 0 s overheard speech re-voiced |
+| Setup rejected | — | no (accepted by `gemini-3.5-live-translate-preview`) |
+| First audio median | 3.26 s | 3.34 s |
+
+If Gemini ever rejects the card, the worker drops it for good and connects
+without it (`test_a_rejected_names_card_is_dropped_never_costing_a_translation`).
 
 ### 5g. Thirty minutes in one room: what "confused after half an hour" was (2026-11-17/18, production)
 

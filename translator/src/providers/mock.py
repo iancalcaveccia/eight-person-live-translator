@@ -174,6 +174,7 @@ class MockProvider(TranslationProvider):
         self._drop_after = drop_after_sec
         self._goaway_after = goaway_after_sec
         self.connect_calls = 0
+        self.last_context: str | None = None
         self.streams: list[MockStream] = []
         self.capabilities = ProviderCapabilities(
             name=name,
@@ -184,8 +185,11 @@ class MockProvider(TranslationProvider):
             supported_targets=supported_targets,
         )
 
-    async def connect(self, *, target_lang: str, echo_target: bool) -> ProviderStream:
+    async def connect(
+        self, *, target_lang: str, echo_target: bool, context: str | None = None
+    ) -> ProviderStream:
         self.connect_calls += 1
+        self.last_context = context
         if not self.supports(target_lang):
             raise ProviderError(f"mock does not support {target_lang}", retryable=False)
         if self._fail_connects > 0:
