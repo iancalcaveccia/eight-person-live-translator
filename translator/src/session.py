@@ -57,6 +57,25 @@ SAME_LANGUAGE_HOLD_SEC = 3.0
 # speech (it lags the input by seconds). Keep dropping that audio until it
 # pauses for this long, unless the speaker's own words were just heard.
 CROSSTALK_TAIL_GAP_SEC = 1.2
+# Stall recovery (see Settings.stall_rotate_sec). Only while the provider is
+# still transcribing the speaker (a transcript in the last few seconds), after
+# enough words that a translation was clearly due, never on a stream younger
+# than this (a fresh stream can be slow to start; another would be slower),
+# and at most once per cooldown.
+STALL_HEARD_RECENT_SEC = 4.0
+STALL_MIN_WORDS = 6
+STALL_MIN_STREAM_AGE_SEC = 20.0
+STALL_COOLDOWN_SEC = 45.0
+# A pause, for switching streams without cutting anyone off: no translated
+# words (or voiced audio that came with words) for this long, and little
+# audio still queued for the listener.
+PAUSE_QUIET_SEC = 1.5
+PAUSE_TEXT_WITH_AUDIO_SEC = 4.0
+PAUSE_MAX_QUEUED_MS = 600
+# After the provider's GoAway: wait for a pause, but switch no later than this
+# before the announced close, and never wait longer than the cap.
+GOAWAY_SAFETY_SEC = 10.0
+GOAWAY_MAX_WAIT_SEC = 40.0
 
 
 @dataclass(frozen=True)
@@ -243,6 +262,17 @@ class TranslationSession:
         self._last_output_ts: float | None = None
         self._last_measured_onset: float | None = None
         self._stalls = 0
+        # Stall recovery: foreign speech the provider transcribed since its
+        # last output (when it started, when last heard, how many words).
+        self._awaiting_since: float | None = None
+        self._awaiting_heard_ts: float | None = None
+        self._awaiting_words = 0
+        self._last_unstick_ts = float("-inf")
+        self.stall_rotations = 0
+        self._last_output_text_ts: float | None = None
+        # A GoAway waiting for a pause (stream, latest switch time).
+        self._goaway_stream: ProviderStream | None = None
+        self._goaway_deadline = 0.0
         self.connect_count = 0
         self.rotations = 0
         self.first_output_ts: float | None = None
@@ -287,6 +317,7 @@ class TranslationSession:
             "drop": self._backlog.dropped_ms,
             "stalls": self._stalls,
             "rot": self.rotations,
+            "unstick": self.stall_rotations,
             "conn": self.connect_count,
             "wh": getattr(self._input, "withheld_frames", 0),
         }
@@ -323,6 +354,7 @@ class TranslationSession:
             backlog_max_ms=round(self._minute_backlog_max),
             stalls=snap["stalls"] - prev["stalls"],
             rotations=snap["rot"] - prev["rot"],
+            stall_rotations=snap["unstick"] - prev["unstick"],
             reconnects=snap["conn"] - prev["conn"],
             withheld_s=round((snap["wh"] - prev["wh"]) / 100, 1),
             state=self.state,
@@ -514,6 +546,7 @@ class TranslationSession:
             same_language_dropped_s=round(self.same_language_dropped_sec, 1),
             crosstalk_dropped_s=round(self.crosstalk_dropped_sec, 1),
             rotations=self.rotations,
+            stall_rotations=self.stall_rotations,
             connects=self.connect_count,
             stalls=self._stalls,
             backlog_dropped_ms=round(self._backlog.dropped_ms),
@@ -724,10 +757,7 @@ class TranslationSession:
                         if self.publish_source:
                             self._source_captions.end_segment()
                 elif isinstance(ev, GoAway):
-                    if stream is self._current and not self._rotating:
-                        task = asyncio.create_task(self._rotate(stream))
-                        self._receivers.add(task)
-                        task.add_done_callback(self._receivers.discard)
+                    self._on_goaway(stream, ev.time_left_sec)
                 elif isinstance(ev, StreamError):
                     self.meter.errors += 1
                     logger.warning("stream error %s: %s", self.key.short(), ev.message)
@@ -751,24 +781,129 @@ class TranslationSession:
         elif stream is not self._current:
             await self._drop_stream(stream)
 
+    def _at_a_pause(self, now: float) -> bool:
+        """The speaker is quiet and the provider has finished voicing.
+
+        "Voicing" is judged by the provider's words, not only its audio: a
+        Live Translate stream sends audio all the time, and some streams'
+        "silence" is faint noise above the silence threshold (production
+        30-min run 2026-11-18: one stream looked busy for 9 minutes, so its
+        refresh never came). Audible output counts as voicing only while
+        output text came with it in the last few seconds."""
+        if self._input.speech_active:
+            return False
+        text_ts = self._last_output_text_ts
+        if text_ts is not None and now - text_ts < PAUSE_QUIET_SEC:
+            return False
+        audio_ts = self._last_output_ts
+        if (
+            audio_ts is not None
+            and now - audio_ts < PAUSE_QUIET_SEC
+            and (text_ts is None or now - text_ts < PAUSE_TEXT_WITH_AUDIO_SEC)
+        ):
+            return False
+        return self._sink is None or self._sink.queued_ms() <= PAUSE_MAX_QUEUED_MS
+
     def _maybe_refresh(self, now: float) -> None:
-        """Fresh provider memory every `stream_refresh_sec`, at a pause: the
-        speaker is quiet and nothing is still being voiced or queued."""
+        """Fresh provider memory every `stream_refresh_sec`, at a pause."""
         every = self._settings.stream_refresh_sec
         cur = self._current
         if every <= 0 or cur is None or self._rotating or self._closed.is_set():
             return
         if now - self._stream_started.get(id(cur), now) < every:
             return
-        if self._input.speech_active:
-            return  # wait for a pause
-        if self._last_output_ts is not None and now - self._last_output_ts < 1.5:
-            return  # a translation is still coming out
-        if self._sink is not None and self._sink.queued_ms() > 200:
+        if not self._at_a_pause(now):
             return
-        task = asyncio.create_task(self._rotate(cur, why="refresh"))
+        self._start_rotation(cur, "refresh")
+
+    def _on_goaway(self, stream: ProviderStream, time_left: float | None) -> None:
+        """The provider will close this stream soon (Gemini: ~50 s ahead, about
+        9 minutes in). Switch at the next pause inside that warning instead of
+        at once: an immediate switch lands mid-sentence (production run
+        2026-11-18: the stream that took over mid-speech misheard the
+        speaker's name for the rest of its life)."""
+        if stream is not self._current or self._rotating:
+            return
+        wait = 0.0
+        if time_left is not None:
+            wait = max(0.0, min(time_left - GOAWAY_SAFETY_SEC, GOAWAY_MAX_WAIT_SEC))
+        if wait <= 0:
+            self._start_rotation(stream, "goaway")
+            return
+        self._goaway_stream = stream
+        self._goaway_deadline = self._clock() + wait
+
+    def _maybe_goaway(self, now: float) -> None:
+        stream = self._goaway_stream
+        if stream is None:
+            return
+        if stream is not self._current or self._rotating or self._closed.is_set():
+            self._goaway_stream = None
+            return
+        if self._at_a_pause(now) or now >= self._goaway_deadline:
+            self._goaway_stream = None
+            self._start_rotation(
+                stream, "goaway" if now < self._goaway_deadline else "goaway_deadline"
+            )
+
+    def _start_rotation(self, stream: ProviderStream, why: str) -> None:
+        task = asyncio.create_task(self._rotate(stream, why=why))
         self._receivers.add(task)
         task.add_done_callback(self._receivers.discard)
+
+    def _note_awaiting(self, ev: TranscriptOut) -> None:
+        """Input the provider should be answering: speech it labels in another
+        language than this session's target (any language for echo sessions).
+        Unlabelled or target-language speech is never counted: the provider
+        rightly stays silent for it, and a rotation would only cost time."""
+        if not ev.lang or not ev.text.strip() or self._crosstalk_held():
+            return
+        heard = ev.lang.split("-")[0].lower()
+        if not self._echo and heard == self.key.target.split("-")[0].lower():
+            return
+        now = self._clock()
+        if self._awaiting_since is None:
+            self._awaiting_since = now
+            self._awaiting_words = 0
+        self._awaiting_heard_ts = now
+        self._awaiting_words += len(ev.text.split())
+
+    def _answered(self) -> None:
+        self._awaiting_since = None
+        self._awaiting_words = 0
+
+    def _maybe_unstick(self, now: float) -> None:
+        """A stream that keeps hearing foreign speech but has said nothing for
+        `stall_rotate_sec` is stuck: switch to a fresh one (make-before-break)."""
+        after = self._settings.stall_rotate_sec
+        cur = self._current
+        if after <= 0 or cur is None or self._rotating or self._closed.is_set():
+            return
+        since = self._awaiting_since
+        if since is None or now - since < after:
+            return
+        if self._awaiting_words < STALL_MIN_WORDS:
+            return
+        heard = self._awaiting_heard_ts
+        if heard is None or now - heard > STALL_HEARD_RECENT_SEC:
+            return  # the speaker paused; decide when they speak again
+        if now - self._stream_started.get(id(cur), now) < STALL_MIN_STREAM_AGE_SEC:
+            return
+        if now - self._last_unstick_ts < STALL_COOLDOWN_SEC:
+            return
+        silent_s = now - since
+        words = self._awaiting_words
+        self._last_unstick_ts = now
+        self.stall_rotations += 1
+        self._answered()
+        logger.warning(
+            "provider stream stuck %s: %d words heard, no output for %.0f s; rotating",
+            self.key.short(),
+            words,
+            silent_s,
+        )
+        self._diag("stall", silent_s=round(silent_s, 1), words=words)
+        self._start_rotation(cur, "stall")
 
     async def _rotate(self, old: ProviderStream, why: str = "goaway") -> None:
         """Make-before-break: open a new stream, switch input, drain the old one."""
@@ -818,6 +953,8 @@ class TranslationSession:
     async def _on_audio(self, ev: AudioOut) -> None:
         assert self._sink is not None
         now = self._clock()
+        if self._awaiting_since is not None and not self._backlog.is_silent(ev.pcm):
+            self._answered()  # the provider is answering, even if dropped below
         if now < self._same_lang_until:
             self.meter.output_seconds += ev.duration_sec  # still billed upstream
             self.same_language_dropped_sec += ev.duration_sec
@@ -919,6 +1056,11 @@ class TranslationSession:
         if ev.kind == "input" and self.crosstalk_feed and self._crosstalk is not None:
             # May mark this speaker (or the one they overhear) as leaking.
             self._crosstalk.note_input(self.key.speaker, ev.text, ev.lang)
+        if ev.kind == "input":
+            self._note_awaiting(ev)
+        elif ev.text.strip():
+            self._last_output_text_ts = self._clock()
+            self._answered()
         if not self._publish_captions:
             return
         if ev.kind == "output" and self._clock() < self._same_lang_until:
@@ -973,7 +1115,9 @@ class TranslationSession:
             tick_now = self._clock()
             if tick_now - self._minute_ts >= 60.0:
                 self._minute_stats(tick_now)
+            self._maybe_goaway(tick_now)
             self._maybe_refresh(tick_now)
+            self._maybe_unstick(tick_now)
             if self.state not in ("live", "delayed"):
                 continue
             now = self._clock()

@@ -174,6 +174,10 @@ class Settings:
     # later; a stream otherwise keeps everything it heard until the provider
     # cuts it (~10 min), possibly mid-sentence. 0 disables.
     stream_refresh_sec: float = 300.0
+    # Field reports (2026): a Live Translate stream can stay open but go silent
+    # for 8 to 51 s. If the provider keeps transcribing foreign speech and nothing
+    # comes back for this long, switch to a fresh stream. 0 disables.
+    stall_rotate_sec: float = 8.0
     provider_failures_before_fallback: int = 3
     connect_timeout_sec: float = 10.0
     rotation_drain_sec: float = 3.0
@@ -247,6 +251,7 @@ def load_settings() -> Settings:
         session_grace_sec=_env_float("SESSION_GRACE_SEC", 10.0),
         stream_keepalive_sec=_env_float("STREAM_KEEPALIVE_SEC", 30.0),
         stream_refresh_sec=_env_float("STREAM_REFRESH_SEC", 300.0),
+        stall_rotate_sec=_env_float("STALL_ROTATE_SEC", 8.0),
         idle_shutdown_sec=_env_float("IDLE_SHUTDOWN_SEC", 30.0),
         admission_fail_closed_sec=_env_float("ADMISSION_FAIL_CLOSED_SEC", 30.0),
         usage_interval_sec=_env_float("USAGE_INTERVAL_SEC", 15.0),

@@ -13,6 +13,7 @@ export const EVENT_KINDS = new Set([
   "session_closed",
   "minute",
   "rotation",
+  "stall",
   "stream_error",
   "crosstalk_hold",
   "crosstalk_lift",

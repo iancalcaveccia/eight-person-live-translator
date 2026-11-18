@@ -33,13 +33,13 @@ microphone from WAV files). Dates: 2026-10-30 (local), 2026-11-17 (production).
 
 | Suite | Command | Result |
 |---|---|---|
-| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **87 passed** (incl. caption retraction; 19 for remembered people & saved tables) |
+| Web unit/integration (vitest, real Postgres via PGlite, real route handlers, real JWTs) | `pnpm test` | **93 passed** (2026-11-18; incl. caption retraction; 19 for remembered people & saved tables; 6 for the stored quality log) |
 | Phone-size screen tour (headless Chrome, Android UA, touch; 360×740 and 390×844) | `E2E_BASE_URL=… pnpm exec playwright test -c playwright.prod.config.ts screens` | **2 passed**, 41 screens, 0 sideways overflow (section 5e) |
 | Type-check | `pnpm typecheck` | PASS |
 | Lint | `pnpm lint` | PASS |
 | Production build | `pnpm build` | PASS |
 | Secret names in client bundle (`.next/static`) | grep for 9 secret names + server code markers | **0 matches** |
-| Worker unit tests | `cd translator && uv run pytest` | **185 passed**, 2 skipped (integration) — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests, and 32 for the same-words (cross-talk) check added 2026-11-17 (every rule mutation-checked: removing it fails a test) |
+| Worker unit tests | `cd translator && uv run pytest` | **203 passed**, 2 skipped (integration), 2026-11-18 — incl. keepalive, same-room bleed, phone-offset alignment, same-language and caption-retraction tests, 32 for the same-words (cross-talk) check added 2026-11-17 (every rule mutation-checked: removing it fails a test), and the long-session pieces: overheard input withheld from the provider, stream refresh only at a pause, per-minute numbers that survive usage reports and 200+ utterances, stuck-stream recovery, GoAway switch at a pause, pauses judged by words not faint noise |
 | Worker lint/format | `uv run ruff check . && uv run ruff format --check .` | PASS |
 | Worker LiveKit integration (real WebRTC, local server, mock provider) | `LIVEKIT_INTEGRATION=1 uv run pytest tests/integration -s` | **2 passed** |
 | Browser E2E (real Chrome, local LiveKit, real worker, mock provider) | `pwsh scripts/e2e-local.ps1` | **4 passed** (section 4) |
@@ -248,6 +248,60 @@ the session finished and asked for a review; no specific problem was reported.
 | Same-language rule | dropped **95 s** (owner's mic) + **63 s** (partner's mic) of picked-up speech instead of re-voicing it; since `270a7ee` the captions of those stretches are retracted |
 | Consequence | For two people with two different languages the language rule covers the leak. A table with three languages needed a better signal than loudness → the same-words check, section 5f |
 
+### 5g. Thirty minutes in one room: what "confused after half an hour" was (2026-11-17/18, production)
+
+The owner's 30-minute session started well and then "got confused and said
+odd things". Reproduced with `longsim` (`table_sim.py --repeat 24
+--keep-captions`): Ian (es) and Partner (pl) 1 m apart (−20 dB leak), phones
+0.5 s apart, the same 30 s + 30 s exchange 24 times in one room (~30 min),
+against the live site. Scored two ways: similarity to cycle 1 (content
+words), and a fact check against the script — 15 facts per translation (name,
+Argentina, Kraków, the bakery on the corner, …) plus the wrong renderings seen
+in the runs (`translator/scripts/long_session_score.py`).
+
+| | Old worker `iuvgXfV7t7x4`: streams replaced only when Gemini forces it (~9 min) | New worker `4YAaWUwk4noH`: overheard input withheld + refresh at a pause every 5 min |
+|---|---|---|
+| Translations heard | 48/48 | 48/48 |
+| Cycles not in real time (excluded) | 2 (×1.14, ×1.15) | 0 (max ×1.04) |
+| First audio median per pair, 1st → 2nd half | pl→es 2.59 → 2.51 s, es→pl 2.88 → 2.81 s | pl→es 3.05 → 2.27 s*, es→pl 2.98 → 2.79 s |
+| Facts right, 1st / 2nd half | 95.8% / 96.7% | 95.6% / 97.2% |
+| Known errors per cycle, 1st / 2nd half | 2.09 / 2.27 | 0.83 / 2.33 |
+| Similarity to cycle 1, 1st / 2nd half | 0.907 / 0.826 | 0.924 / 0.867 |
+| Longest one stream kept repeating its errors | ~10 min | ≤ 5 min on the Spanish speaker's stream; 9 min on the Polish one (see 3) |
+
+\* partly early triggers on faint provider noise (point 3), not faster translation.
+
+What it shows:
+
+1. **There is no gradual decline.** The similarity drop starts exactly at the
+   first stream swap (minute 9 in the old run, Gemini's forced swap; minute 5
+   in the new one, the first refresh). Mostly it is rewording: a stream
+   repeats its own earlier wording of the same audio word for word, a fresh
+   one words it anew — often better ("Jan Luka" in cycles 1–6 became the
+   correct "Ian Luca" after the first refresh). Delay is flat (~2.5–3 s).
+2. **Errors belong to a stream and stick.** Each fresh stream makes a few of
+   its own ("Iga" for Ian, "aprecio la harina" for "el precio de la harina",
+   "talón de Aquiles", "Nazywam się Cześć") and repeats them every cycle until
+   it is replaced. The old worker's bad stream from minute 9 kept its errors
+   ~10 minutes. The 5-minute refresh shortens that; it does not make a single
+   stream more accurate. In a real conversation the same stickiness shows as
+   a misheard name being reused. Next steps: names given to each stream at
+   the start (context card), and health checks that replace a stream showing
+   failure signs at its next pause.
+3. **Found in the stored log** (`diag_report.py`): Gemini sends audio
+   continuously (~60 s per minute per stream, silence included), and two of
+   the Polish speaker's streams sent "silence" with faint noise above the
+   −45 dBFS threshold. The worker took that for talking, so it never found a
+   pause: no refresh for 9 minutes, then Gemini's forced swap mid-speech — and
+   that stream got the name wrong ("Iga") from then on. Fixed after this run:
+   pauses are judged by the provider's words, and a GoAway waits for a pause
+   inside its ~50 s warning (WORKER.md "Reconnect, rotation, fallback").
+4. Overheard speech re-voiced: 2.2 s in 30 min (new) vs 13.6 s (old, mostly
+   in one overloaded cycle).
+
+Raw data: `docs/results/2026-11-17-long-session-old.json`,
+`docs/results/2026-11-18-long-session-new.json` (with captions).
+
 ### 5f. Three languages at one table: the same-words check (2026-11-17, local stack + real Gemini)
 
 Local LiveKit `--dev`, the built web app and a local worker with **real
@@ -314,7 +368,9 @@ screenshots each one and fails if anything sticks out sideways.
 |---|---|---|
 | Web app on Vercel `consultorios/eight-person-live-translator` | **Deployed and functional** | https://eight-person-live-translator.vercel.app, `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"commit":"64c86b9"}`; `/api/config` → `mediaConfigured:true, maxHumans:8, defaultProvider:gemini, perGatheringCapUsd:50`; functions in `fra1` |
 | Postgres | **Neon, eu-central-1**, connected via the Vercel integration | health `database:true`; gatherings created/joined/ended by the probe |
-| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `iuvgXfV7t7x4` (same-words check + stale-flag fix, `9b16562`) deployed 2026-11-17 23:01 UTC, status Running; verified with a live three-language run (section 5f) |
+| LiveKit Cloud worker | **Running**, agent `gemini-translator` (`CA_N7EbVp9hMsHu`), region eu-central, 1 replica | `lk agent status`: version `4YAaWUwk4noH` (commit `a955091`: overheard input withheld, 5-minute refresh at a pause, stored quality log) deployed 2026-11-18 00:13 UTC, status Running. Earlier: `iuvgXfV7t7x4` (`9b16562`), verified with a live three-language run (section 5f) |
+| Stored quality log (`a955091`) | **Working** 2026-11-18 | signed `POST /api/internal/diagnostics` returns the worker's events: `worker_started`, `session_started`, `minute`, `crosstalk_hold/lift/summary`, `session_closed`; read with `translator/scripts/diag_report.py`. Found and fixed on the first live read: event data stored as a JSON string (postgres.js), per-minute output seconds reset by usage reports |
+| Web app at `a955091` (stored quality log) | **Deployed 2026-11-18 ~00:12 UTC** | `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres","livekit":true,"internalApi":true,"hostCode":true,"openCreation":true,"commit":"a955091"}` |
 | Web app update: saved tables, pocket mode, phone layout (`1d0c770`) | **Deployed 2026-11-17 ~21:32 UTC** | `/api/health` → `{"ok":true,"database":true,"databaseKind":"postgres",…,"openCreation":true,"commit":"1d0c770"}`; `/manifest.webmanifest` → `id "/"`, `standalone`, 3 icons; `/sw.js` 200; `/api/me` without a cookie → `{"person":null,…}`; migration `002_people_tables` applied on first request; section 5e runs |
 | Gemini key | configured on the worker only (never on Vercel, never seen by the assistant) | probe runs in section 5 |
 | OpenAI key | not configured (optional backup) | — |

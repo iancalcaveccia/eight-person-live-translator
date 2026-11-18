@@ -374,6 +374,173 @@ async def test_stream_memory_is_refreshed_at_a_pause_without_a_gap():
     assert [k for k, _ in events][-1] == "session_closed"
 
 
+async def _stuck_session(**settings_overrides):
+    """A session whose stream is old enough to be judged, hearing Spanish
+    for its Polish listener, with nothing coming back."""
+    events: list[tuple] = []
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        settings=fast(**settings_overrides),
+        diag=lambda kind, spk, tgt, **data: events.append((kind, data)),
+    )
+    assert await wait_for(lambda: session._current is not None)
+    session._stream_started[id(session._current)] = time.monotonic() - 60
+    for text in ("mañana vamos a comer", "empanadas en la casa", "de mi madre"):
+        await session._on_transcript(TranscriptOut(kind="input", text=text, lang="es"))
+    return inp, session, events
+
+
+async def test_a_stuck_stream_is_replaced_while_the_speaker_talks():
+    """Field reports: a stream can stay open and silent for 8 to 51 s. The
+    provider keeps transcribing the speaker but says nothing: switch streams."""
+    inp, session, events = await _stuck_session()
+    session._awaiting_since = time.monotonic() - 9  # 9 s of speech, no output
+    session._maybe_unstick(time.monotonic())
+    assert await wait_for(lambda: session.rotations >= 1, timeout=5)
+    assert session.stall_rotations == 1
+    assert ("stall", 11) in [(k, d.get("words")) for k, d in events]
+    assert ("rotation", "stall") in [(k, d.get("why")) for k, d in events]
+    assert await wait_for(lambda: not session._rotating, timeout=5)
+    # Stuck again right away (new stream made to look old): the cooldown
+    # stops a second switch so soon.
+    session._stream_started[id(session._current)] = time.monotonic() - 60
+    session._awaiting_since = time.monotonic() - 9
+    session._awaiting_heard_ts = time.monotonic()
+    session._awaiting_words = 20
+    session._maybe_unstick(time.monotonic())
+    await asyncio.sleep(0.2)
+    assert session.stall_rotations == 1 and session.rotations == 1
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_no_stall_rotation_when_silence_is_expected_or_too_soon():
+    inp, session, _events = await _stuck_session()
+    now = time.monotonic()
+    # Not long enough yet.
+    session._awaiting_since = now - 5
+    session._maybe_unstick(now)
+    # The speaker paused: nothing heard for a while.
+    session._awaiting_since = now - 12
+    session._awaiting_heard_ts = now - 6
+    session._maybe_unstick(now)
+    # Any output (even if it is dropped later) answers the speech.
+    session._awaiting_heard_ts = now
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    assert session._awaiting_since is None
+    session._maybe_unstick(now)
+    # So does an output transcript.
+    await session._on_transcript(
+        TranscriptOut(kind="input", text="uno dos tres cuatro cinco seis", lang="es")
+    )
+    await session._on_transcript(TranscriptOut(kind="output", text="jeden", lang="pl"))
+    assert session._awaiting_since is None
+    # Speech already in the listener's language, unlabelled speech, a short
+    # word: the provider rightly stays silent.
+    await session._on_transcript(
+        TranscriptOut(
+            kind="input", text="dzień dobry wszystkim jak się macie dzisiaj", lang="pl"
+        )
+    )
+    await session._on_transcript(
+        TranscriptOut(kind="input", text="uno dos tres cuatro cinco seis", lang=None)
+    )
+    assert session._awaiting_since is None
+    await session._on_transcript(TranscriptOut(kind="input", text="sí", lang="es"))
+    session._awaiting_since = now - 12
+    session._maybe_unstick(now)
+    # A young stream is given time to start.
+    session._awaiting_words = 20
+    session._stream_started[id(session._current)] = now - 5
+    session._maybe_unstick(now)
+    # Switched off.
+    session._stream_started[id(session._current)] = now - 60
+    session._settings = fast(stall_rotate_sec=0)
+    session._maybe_unstick(now)
+    await asyncio.sleep(0.2)
+    assert session.rotations == 0 and session.stall_rotations == 0
+    await session.aclose()
+    await inp.aclose()
+
+
+async def _live_session(**settings_overrides):
+    events: list[tuple] = []
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        settings=fast(**settings_overrides),
+        diag=lambda kind, spk, tgt, **data: events.append((kind, data)),
+    )
+    assert await wait_for(lambda: session._current is not None)
+    return inp, session, events
+
+
+async def test_goaway_switches_at_the_next_pause_not_mid_sentence():
+    """Gemini warns ~50 s before closing a stream. Switching at once lands
+    mid-sentence; wait for the speaker's pause inside the warning."""
+    inp, session, events = await _live_session(stream_refresh_sec=0)
+    inp.speech_active = True
+    session._on_goaway(session._current, 50.0)
+    session._maybe_goaway(time.monotonic() + 5)
+    await asyncio.sleep(0.2)
+    assert session.rotations == 0  # still talking: wait
+    inp.speech_active = False
+    session._maybe_goaway(time.monotonic() + 6)
+    assert await wait_for(lambda: session.rotations == 1, timeout=5)
+    assert ("rotation", "goaway") in [(k, d.get("why")) for k, d in events]
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_goaway_switches_before_the_close_even_if_nobody_pauses():
+    inp, session, events = await _live_session(stream_refresh_sec=0)
+    inp.speech_active = True
+    session._on_goaway(session._current, 50.0)
+    session._maybe_goaway(time.monotonic() + 41)  # 40 s cap, 10 s before close
+    assert await wait_for(lambda: session.rotations == 1, timeout=5)
+    assert ("rotation", "goaway_deadline") in [(k, d.get("why")) for k, d in events]
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_goaway_without_time_left_switches_at_once():
+    inp, session, _events = await _live_session(stream_refresh_sec=0)
+    inp.speech_active = True
+    session._on_goaway(session._current, None)
+    assert await wait_for(lambda: session.rotations == 1, timeout=5)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_faint_noise_from_the_provider_does_not_hide_a_pause():
+    """A stream's 'silence' can be faint noise over the silence threshold;
+    without translated words it must not count as the provider talking."""
+    inp, session, _events = await _live_session(stream_refresh_sec=0)
+    inp.speech_active = False
+    now = time.monotonic()
+    session._last_output_ts = now  # 'audible' just now...
+    session._last_output_text_ts = now - 10  # ...but no words for 10 s
+    assert session._at_a_pause(now)
+    session._last_output_text_ts = now - 2  # words a moment ago: still voicing
+    assert not session._at_a_pause(now)
+    session._last_output_ts = now - 5
+    session._last_output_text_ts = now - 0.5  # words still coming
+    assert not session._at_a_pause(now)
+    session._last_output_text_ts = now - 3
+    assert session._at_a_pause(now)
+    inp.speech_active = True
+    assert not session._at_a_pause(now)
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_no_refresh_while_the_speaker_is_talking():
     inp = make_input(silence(4.0))
     io = FakeRoomIO()

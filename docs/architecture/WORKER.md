@@ -247,6 +247,14 @@ session's log: Polish heard 58× on the Spanish speaker's mic).
   pause (speaker quiet, nothing being voiced or queued), the session opens a
   new stream before closing the old one — no gap. A stream older than that
   in a non-stop monologue still rotates when the provider asks (GoAway).
+- **Stuck streams** (`STALL_ROTATE_SEC`, default 8): field reports (2026)
+  describe Live Translate streams that stay open but go silent for 8–51 s.
+  When the provider keeps transcribing the speaker in another language than
+  the listener's (≥ 6 words, last one < 4 s ago) and no audio or output text
+  has come back for 8 s, the session switches to a fresh stream the same
+  make-before-break way. Never for the listener's own language or unlabelled
+  speech (silence is right there), never on a stream younger than 20 s, at
+  most once per 45 s. Logged as a `stall` event and `stall_rotations`.
 - **Stored diagnostics** (`/api/internal/events` → `worker_events`, 30 days,
   numbers and labels only): stream open/close with totals, one `minute`
   event per stream (delay p50, the provider's language labels — a speaker's
@@ -280,6 +288,19 @@ session's log: Polish heard 58× on the Spanish speaker's mic).
   reconnect. **verified** (mock drop and fake-Gemini abrupt close).
 - Gemini `goAway` → make-before-break: a new socket is opened and fed before
   the old one is closed (old drains ≤ 3 s). **verified** (mock and fake Gemini).
+  Since 2026-11-18 the switch waits for the next pause inside the warning
+  (Gemini sends it ~50 s ahead): at most 40 s, and no later than 10 s before
+  the announced close (`why=goaway_deadline` in the log when nobody paused).
+  Without a `timeLeft` it switches at once. Reason: in the 30-minute
+  production run the stream that took over mid-speech misheard the
+  speaker's name for the rest of its life.
+- What counts as a pause (for the refresh and the GoAway switch): the
+  speaker quiet, no translated words for 1.5 s, audible output only if words
+  came with it in the last 4 s, ≤ 600 ms queued. Judged by words because a
+  Live Translate stream sends audio continuously (~60 s per minute in the
+  logs) and some streams' "silence" is faint noise above the −45 dBFS
+  silence threshold; one such stream looked busy for 9 minutes and never
+  got its refresh.
 - Setup layout: transcription flags at `setup` level by default, automatic
   one-time fallback to the `generationConfig`-nested layout on a 1007/"Unknown
   name" rejection; both rejected → non-retryable error. **verified** against a

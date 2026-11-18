@@ -258,8 +258,8 @@ no new sessions until a later response allows it.
 
 Sent with each usage report (≤ 300 events per call; the worker keeps at most
 500 if the API is down). Kinds: `worker_started`, `session_started`,
-`session_closed`, `minute`, `rotation`, `stream_error`, `crosstalk_hold`,
-`crosstalk_lift`, `crosstalk_summary`.
+`session_closed`, `minute`, `rotation`, `stall`, `stream_error`,
+`crosstalk_hold`, `crosstalk_lift`, `crosstalk_summary`, `bleed_summary`.
 
 ```json
 {"room":"grp_...","events":[{"ts":1795000000.1,"kind":"minute","speaker":"<uuid>","target":"pl",
@@ -310,6 +310,7 @@ Worker (`translator/.env.local`, LiveKit Cloud secrets):
 | `BLEED_GUARD` | no | `true` |
 | `CROSSTALK_GUARD` | no | `true` (same words on two mics; see WORKER.md) |
 | `STREAM_REFRESH_SEC` | no | `300` (fresh provider stream at a pause; 0 = only when the provider asks) |
+| `STALL_ROTATE_SEC` | no | `8` (fresh stream when the provider hears foreign speech but returns nothing this long; 0 = off) |
 | `GEMINI_VAD_START` / `GEMINI_VAD_END` / `GEMINI_VAD_SILENCE_MS` / `GEMINI_VAD_PREFIX_MS` | no | unset (Gemini speech-detection tuning; only after a local test) |
 
 Control plane (`.env.local`, Vercel env): `LIVEKIT_URL`, `LIVEKIT_API_KEY`,

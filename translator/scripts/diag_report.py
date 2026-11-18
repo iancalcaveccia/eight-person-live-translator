@@ -87,6 +87,7 @@ def render(data: dict) -> str:
                     f"  same-drop {d.get('same_language_dropped_s', 0)}s  xt-drop {d.get('crosstalk_dropped_s', 0)}s"
                     f"  withheld {d.get('withheld_s', 0)}s  backlog max {d.get('backlog_max_ms', 0)}ms"
                     f" drop {d.get('backlog_dropped_ms', 0)}ms  rot {d.get('rotations', 0)}"
+                    f" (stuck {d.get('stall_rotations', 0)})"
                     f"  reconn {d.get('reconnects', 0)}  {d.get('state', '')}"
                 )
             else:
