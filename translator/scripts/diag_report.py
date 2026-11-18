@@ -21,10 +21,12 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from control_plane import ControlPlaneClient
+
+DEFAULT_APP_URL = "https://eight-person-live-translator.vercel.app"
 
 
 def _hhmm(ts: str) -> str:
@@ -35,9 +37,21 @@ def _short(v: str | None) -> str:
     return (v or "-")[:8]
 
 
+def _as_dict(v: object) -> dict:
+    """Events stored before the web fix of 2026-11-18 carry their data as a
+    JSON string; newer ones as an object."""
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return {}
+    return v if isinstance(v, dict) else {}
+
+
 def render(data: dict) -> str:
     rooms: dict[str, list[dict]] = defaultdict(list)
     for e in data["events"]:
+        e["data"] = _as_dict(e.get("data"))
         rooms[e.get("room") or "?"].append(e)
     out = [
         f"diagnostics {data['since']} .. {data['until']}  ({len(data['events'])} events)"
@@ -88,11 +102,23 @@ def render(data: dict) -> str:
 
 async def fetch(hours: float, room: str | None) -> dict:
     load_dotenv(Path(__file__).resolve().parent.parent / ".env.local")
-    base = os.environ.get("CONTROL_PLANE_URL", "").rstrip("/")
-    secret = os.environ.get("INTERNAL_API_SECRET", "")
-    if not base or not secret:
+    # Production secrets written by scripts/configure-cloud.ps1 (gitignored).
+    generated = dotenv_values(
+        Path(__file__).resolve().parents[2] / ".secrets" / "generated.env"
+    )
+    base = (
+        os.environ.get("CONTROL_PLANE_URL")
+        or os.environ.get("MESA_APP_URL")
+        or DEFAULT_APP_URL
+    ).rstrip("/")
+    secret = (
+        os.environ.get("INTERNAL_API_SECRET")
+        or generated.get("INTERNAL_API_SECRET")
+        or ""
+    )
+    if not secret:
         raise SystemExit(
-            "CONTROL_PLANE_URL and INTERNAL_API_SECRET are needed (translator/.env.local)"
+            "INTERNAL_API_SECRET is needed (translator/.env.local or .secrets/generated.env)"
         )
     client = ControlPlaneClient(base_url=base, secret=secret)
     since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))

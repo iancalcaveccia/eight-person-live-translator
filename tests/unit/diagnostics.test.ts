@@ -54,6 +54,21 @@ describe("worker diagnostics", () => {
     expect(body.events[1].data).toEqual({ output_s: 41.2, first_audio_p50_ms: 3120, heard: { es: 12, pl: 2 } });
   });
 
+  it("stores the data as a JSON object, and still reads rows that an older version stored as a JSON string", async () => {
+    const room = "grp_abcdefghijklmnopqrstuvwx";
+    await eventsRoute(signedRequest({ room, events: [{ kind: "minute", data: { output_s: 7 } }] }));
+    const types = await db.query<{ t: string }>("select jsonb_typeof(data) as t from worker_events");
+    expect(types).toEqual([{ t: "object" }]);
+    // What postgres.js wrote before the fix: the JSON text itself, as a jsonb string.
+    await db.query("insert into worker_events (room, kind, data) values ($1, 'minute', to_jsonb($2::text))", [
+      room,
+      JSON.stringify({ output_s: 5, heard: { es: 4 } }),
+    ]);
+    const read = await diagnosticsRoute(signedRequest({ room }));
+    const body = (await read.json()) as { events: { data: unknown }[] };
+    expect(body.events.map((e) => e.data)).toEqual([{ output_s: 7 }, { output_s: 5, heard: { es: 4 } }]);
+  });
+
   it("keeps events of a room whose gathering already ended (closing summaries arrive late)", async () => {
     const res = await eventsRoute(signedRequest({ room: "grp_abcdefghijklmnopqrstuvwx", events: [{ kind: "session_closed", data: { reason: "speaker_left" } }] }));
     expect(res.status).toBe(200);

@@ -36,6 +36,20 @@ class SessionMeter:
     all_first_audio_ms: list[float] = field(default_factory=list)
     period_start: float = field(default_factory=time.time)
     _connected_since: float | None = None
+    # Seconds already handed over in earlier usage records: take_record()
+    # resets the counters above every report, the totals below never reset.
+    _input_reported: float = 0.0
+    _output_reported: float = 0.0
+    # Every first-audio sample ever taken (all_first_audio_ms keeps the last 200).
+    first_audio_count: int = 0
+
+    @property
+    def total_input_seconds(self) -> float:
+        return self._input_reported + self.input_seconds
+
+    @property
+    def total_output_seconds(self) -> float:
+        return self._output_reported + self.output_seconds
 
     def mark_connected(self, now: float | None = None) -> None:
         if self._connected_since is None:
@@ -50,6 +64,7 @@ class SessionMeter:
     def add_first_audio(self, ms: float) -> None:
         self.first_audio_ms.append(ms)
         self.all_first_audio_ms.append(ms)
+        self.first_audio_count += 1
         if len(self.all_first_audio_ms) > 200:
             del self.all_first_audio_ms[:-200]
 
@@ -82,6 +97,8 @@ class SessionMeter:
             "errors": self.errors,
             "firstAudioMs": [round(x) for x in self.first_audio_ms],
         }
+        self._input_reported += self.input_seconds
+        self._output_reported += self.output_seconds
         self.input_seconds = 0.0
         self.output_seconds = 0.0
         self.session_seconds = 0.0

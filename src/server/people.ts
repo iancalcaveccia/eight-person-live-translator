@@ -60,7 +60,7 @@ export function personView(p: PersonRow): PersonView {
 }
 
 async function audit(q: Queryable, kind: string, actorId: string | null, subjectId: string | null, detail: Record<string, unknown> = {}) {
-  await q.query("insert into audit_events (gathering_id, kind, actor_id, subject_id, detail) values (null, $1, $2, $3, $4::jsonb)", [
+  await q.query("insert into audit_events (gathering_id, kind, actor_id, subject_id, detail) values (null, $1, $2, $3, $4::text::jsonb)", [
     kind,
     actorId,
     subjectId,

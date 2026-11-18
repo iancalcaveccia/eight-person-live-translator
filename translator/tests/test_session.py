@@ -415,6 +415,60 @@ async def test_minute_stats_report_numbers_only():
     await inp.aclose()
 
 
+async def test_minute_stats_survive_usage_reports_in_between():
+    """Usage is reported (and its counters reset) every few seconds; the
+    per-minute numbers must still be what happened in that minute, never
+    negative. Production logs showed 'out -0.2s' before this was fixed."""
+    events: list[tuple] = []
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        diag=lambda kind, spk, tgt, **data: events.append((kind, spk, tgt, data)),
+        speak_lang="es",
+    )
+    await session._on_transcript(TranscriptOut(kind="input", text="uno", lang="es"))
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    session._minute_stats(time.monotonic())
+    first = events[-1][3]["output_s"]
+    session.take_usage_records()  # usage report: counters reset
+    await session._on_audio(AudioOut(pcm=_loud(), sample_rate=24000))
+    session.take_usage_records()
+    session._minute_stats(time.monotonic())
+    second = events[-1][3]["output_s"]
+    assert first > 0 and second > 0
+    assert second == pytest.approx(first / 2, abs=0.1)
+    await session.aclose()
+    await inp.aclose()
+
+
+async def test_minute_delay_keeps_working_after_200_utterances():
+    """The sample list is capped at 200; a long dinner passes that."""
+    events: list[tuple] = []
+    inp = make_input(silence(3.0))
+    io = FakeRoomIO()
+    session = await start_session(
+        inp,
+        [MockProvider(delay_ms=100)],
+        io,
+        diag=lambda kind, spk, tgt, **data: events.append((kind, spk, tgt, data)),
+    )
+    for _ in range(250):
+        session.meter.add_first_audio(2500)
+    session._minute_stats(time.monotonic())
+    for ms in (3000, 3200, 3400):
+        session.meter.add_first_audio(ms)
+    session._minute_stats(time.monotonic())
+    data = events[-1][3]
+    assert data["first_audio_n"] == 3
+    assert data["first_audio_p50_ms"] == 3200
+    await session.aclose()
+    await inp.aclose()
+
+
 async def test_echo_sessions_keep_same_language_output():
     """'I switch languages' speakers use echo sessions on purpose."""
     inp = make_input(silence(3.0))

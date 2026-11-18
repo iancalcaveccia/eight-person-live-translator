@@ -147,7 +147,7 @@ async function audit(
   detail: Record<string, unknown> = {},
 ): Promise<void> {
   await q.query(
-    "insert into audit_events (gathering_id, kind, actor_id, subject_id, detail) values ($1, $2, $3, $4, $5::jsonb)",
+    "insert into audit_events (gathering_id, kind, actor_id, subject_id, detail) values ($1, $2, $3, $4, $5::text::jsonb)",
     [gatheringId, kind, actorId, subjectId, JSON.stringify(detail)],
   );
 }

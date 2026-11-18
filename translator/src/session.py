@@ -197,6 +197,8 @@ class TranslationSession:
         self.state = "idle"
         self.meters: list[SessionMeter] = []
         self.meter = self._new_meter()
+        # Totals of meters replaced by a provider fallback (per-minute stats).
+        self._carried: dict[str, float] = {"out": 0.0, "inp": 0.0, "fa": 0}
         self._sink: AudioSink | None = None
         self._sid: str | None = None
         self._sub: Subscription | None = None
@@ -274,9 +276,11 @@ class TranslationSession:
 
     def _snapshot(self) -> dict[str, Any]:
         return {
-            "out": self.meter.output_seconds,
-            "inp": self.meter.input_seconds,
-            "fa": len(self.meter.all_first_audio_ms),
+            # Whole-session totals: the plain counters reset at every usage
+            # report, and the sample list keeps only the last 200.
+            "out": self._carried["out"] + self.meter.total_output_seconds,
+            "inp": self._carried["inp"] + self.meter.total_input_seconds,
+            "fa": self._carried["fa"] + self.meter.first_audio_count,
             "heard": dict(self.heard_languages),
             "same": self.same_language_dropped_sec,
             "xt": self.crosstalk_dropped_sec,
@@ -293,7 +297,8 @@ class TranslationSession:
         (a speaker's own stream labelled in other languages = confusion), drops."""
         snap = self._snapshot()
         prev = self._minute or {k: (0 if k != "heard" else {}) for k in snap}
-        samples = self.meter.all_first_audio_ms[prev["fa"] :]
+        new_fa = int(snap["fa"] - prev["fa"])
+        samples = self.meter.all_first_audio_ms[-new_fa:] if new_fa > 0 else []
         heard = {
             lang: n - prev["heard"].get(lang, 0)
             for lang, n in snap["heard"].items()
@@ -615,6 +620,9 @@ class TranslationSession:
         self._provider_idx += 1
         self._failures = 0
         self.meter.mark_disconnected()
+        self._carried["out"] += self.meter.total_output_seconds
+        self._carried["inp"] += self.meter.total_input_seconds
+        self._carried["fa"] += self.meter.first_audio_count
         self.meter = self._new_meter()
         self._attach_input()
         logger.warning(

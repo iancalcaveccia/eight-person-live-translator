@@ -75,7 +75,7 @@ export async function recordWorkerEvents(room: string, events: WorkerEventInput[
     const when = new Date(Math.min(now + 60_000, Math.max(now - 86_400_000, tsMs)));
     await db.query(
       `insert into worker_events (created_at, room, gathering_id, group_id, kind, speaker_id, target_lang, data)
-       values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+       values ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb)`,
       [
         when,
         room,
@@ -92,6 +92,20 @@ export async function recordWorkerEvents(room: string, events: WorkerEventInput[
   return stored;
 }
 
+/**
+ * Rows written before the `$n::text::jsonb` fix hold their data twice encoded
+ * (a JSON string inside jsonb): postgres.js serialises a jsonb parameter with
+ * JSON.stringify even when it is already a string. Read both forms.
+ */
+function storedObject(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return {};
+  }
+}
+
 export interface DiagnosticsQuery {
   since?: unknown;
   until?: unknown;
@@ -105,12 +119,14 @@ export async function readDiagnostics(q: DiagnosticsQuery) {
   const until = typeof q.until === "string" && !Number.isNaN(Date.parse(q.until)) ? new Date(q.until) : new Date(now + 60_000);
   const room = typeof q.room === "string" && ROOM_RE.test(q.room) ? q.room : null;
   const db = await getDb();
-  const events = await db.query(
-    `select created_at, room, kind, speaker_id, target_lang, data from worker_events
-      where created_at >= $1 and created_at <= $2 and ($3::text is null or room = $3)
-      order by created_at asc limit 20000`,
-    [since, until, room],
-  );
+  const events = (
+    await db.query<{ data: unknown }>(
+      `select created_at, room, kind, speaker_id, target_lang, data from worker_events
+        where created_at >= $1 and created_at <= $2 and ($3::text is null or room = $3)
+        order by created_at asc limit 20000`,
+      [since, until, room],
+    )
+  ).map((e) => ({ ...e, data: storedObject(e.data) }));
   const usage = await db.query(
     `select created_at, gathering_id, group_id, speaker_id, target_lang, provider, input_seconds, output_seconds,
             session_seconds, cost_usd, errors, first_audio_ms, period_start, period_end

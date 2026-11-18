@@ -54,3 +54,6 @@ next-env.d.ts
 
 # locally generated deployment secrets (scripts/configure-cloud.ps1)
 /.secrets/
+
+# deep-research working notes
+/research_notes/
