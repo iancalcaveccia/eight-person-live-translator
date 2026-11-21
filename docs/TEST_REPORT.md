@@ -271,8 +271,8 @@ time (×1.01 / ×1.05), 16/16 translations heard each.
 exchange through the production site with display names "Ian Luca" / "Ola",
 3 cycles: name exact **6/6**, 6/6 translations heard, 0.3 s re-voiced. (Same
 script before, with names "Ian"/"Partner": "Gianluca", "Ian Luka".) The
-privacy-page sentence about names is committed but **not yet on the live
-site**: the Vercel CLI login on this PC expired.
+privacy page says display names go to Google; live since 2026-11-20
+(`/api/health` → `commit "9816fe0"`, sentence present on `/privacy`).
 
 If Gemini ever rejects the card, the worker drops it for good and connects
 without it (`test_a_rejected_names_card_is_dropped_never_costing_a_translation`).
