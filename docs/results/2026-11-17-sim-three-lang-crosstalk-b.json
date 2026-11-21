@@ -1,0 +1,193 @@
+{
+  "date_utc": "2026-11-17T22:34:07Z",
+  "app_host": "127.0.0.1:3100",
+  "people": [
+    "Ian speaks es, hears es",
+    "Partner speaks pl, hears pl",
+    "Friend speaks en, hears en"
+  ],
+  "bleed_db": -20.0,
+  "phone_delay_ms": [
+    0.0,
+    250.0,
+    0.0
+  ],
+  "published_in_real_time": true,
+  "publish_time_ratio": 1.01,
+  "translations_expected": 8,
+  "translations_heard": 8,
+  "all_began_before_speaker_stopped": false,
+  "first_audio_median_s": 4.2,
+  "first_audio_max_s": 4.79,
+  "phantom_total_s": 4.59,
+  "phantom_caption_segments_total": 0,
+  "expected": [
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 40.2,
+      "speech_s": 29.7,
+      "first_audio_s": 4.73,
+      "began_before_speaker_stopped": true,
+      "heard_s": 24.2
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 85.2,
+      "speech_s": 1.8,
+      "first_audio_s": 2.15,
+      "began_before_speaker_stopped": false,
+      "heard_s": 6.2
+    },
+    {
+      "speaker": "Friend",
+      "listener": "Ian",
+      "pair": "en->es",
+      "at_s": 77.0,
+      "speech_s": 29.9,
+      "first_audio_s": 4.69,
+      "began_before_speaker_stopped": true,
+      "heard_s": 24.1
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 3.0,
+      "speech_s": 29.7,
+      "first_audio_s": 3.25,
+      "began_before_speaker_stopped": true,
+      "heard_s": 20.6
+    },
+    {
+      "speaker": "Friend",
+      "listener": "Partner",
+      "pair": "en->pl",
+      "at_s": 77.0,
+      "speech_s": 29.9,
+      "first_audio_s": 4.77,
+      "began_before_speaker_stopped": true,
+      "heard_s": 24.2
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Friend",
+      "pair": "es->en",
+      "at_s": 3.0,
+      "speech_s": 29.7,
+      "first_audio_s": 3.34,
+      "began_before_speaker_stopped": true,
+      "heard_s": 19.7
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Friend",
+      "pair": "pl->en",
+      "at_s": 40.2,
+      "speech_s": 29.7,
+      "first_audio_s": 4.79,
+      "began_before_speaker_stopped": true,
+      "heard_s": 23.5
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Friend",
+      "pair": "pl->en",
+      "at_s": 85.2,
+      "speech_s": 1.8,
+      "first_audio_s": 3.7,
+      "began_before_speaker_stopped": false,
+      "heard_s": 4.8
+    }
+  ],
+  "phantoms": [
+    {
+      "track_of": "Partner",
+      "heard_by": "Ian",
+      "language": "es",
+      "phantom_s": 0.39,
+      "phantom_at_s": [
+        "95.5-95.8"
+      ],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 1,
+      "subscribed": true
+    },
+    {
+      "track_of": "Friend",
+      "heard_by": "Ian",
+      "language": "es",
+      "phantom_s": 1.58,
+      "phantom_at_s": [
+        "45.2-47.0"
+      ],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 1,
+      "subscribed": true
+    },
+    {
+      "track_of": "Ian",
+      "heard_by": "Partner",
+      "language": "pl",
+      "phantom_s": 0.0,
+      "phantom_at_s": [],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 0,
+      "subscribed": true
+    },
+    {
+      "track_of": "Friend",
+      "heard_by": "Partner",
+      "language": "pl",
+      "phantom_s": 1.52,
+      "phantom_at_s": [
+        "6.7-7.0",
+        "46.1-47.3"
+      ],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 2,
+      "subscribed": true
+    },
+    {
+      "track_of": "Ian",
+      "heard_by": "Friend",
+      "language": "en",
+      "phantom_s": 0.0,
+      "phantom_at_s": [],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 1,
+      "subscribed": true
+    },
+    {
+      "track_of": "Partner",
+      "heard_by": "Friend",
+      "language": "en",
+      "phantom_s": 1.1,
+      "phantom_at_s": [
+        "6.8-7.4",
+        "95.4-95.8"
+      ],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 2,
+      "subscribed": true
+    }
+  ],
+  "host": "Windows-11-10.0.26300-SP0",
+  "note": "Synthetic voices and synthetic room bleed; not a phone/Bluetooth test.",
+  "worker_config": "BLEED_GUARD=0 CROSSTALK_GUARD=1 (local worker, real Gemini)"
+}

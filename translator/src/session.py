@@ -1,351 +1,1150 @@
-"""One bidirectional Gemini Live session bridging a speaker to a target language.
+"""One streaming translation: speaker S -> target language T within one group.
 
-We talk to Gemini Live via a raw WebSocket against the v1beta BidiGenerateContent
-endpoint rather than via google-genai's `client.aio.live.connect()`. The v1beta
-API expects `translationConfig` nested under `generationConfig` (renamed from the
-EAP-era `streamingTranslationConfig` at the public launch). Bypassing the SDK lets
-us control the exact JSON shape; python-genai >= 2.8.0 now exposes a matching
-`TranslationConfig` if we later choose to adopt the SDK.
+Streaming invariants (release gate):
+* Input chunks are forwarded to the provider as soon as they are produced
+  (100 ms for Gemini); nothing waits for an utterance, turnComplete, a
+  transcript or punctuation.
+* Every translated audio chunk is written to the published track the moment
+  it arrives. Captions are a side channel and never delay audio.
+* Overlapping speakers are independent sessions with independent tracks, so
+  an interjection is never queued behind another speaker.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
-import json
 import logging
-import random
+import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
-import websockets
-from livekit import rtc
-
-from audio import iter_pcm_for_gemini, make_audio_source, push_pcm_to_source
-from config import (
-    GEMINI_INPUT_SAMPLE_RATE,
-    GEMINI_MAX_FAILURES_BEFORE_LONG_BACKOFF,
-    GEMINI_MODEL,
-    GEMINI_RECONNECT_BACKOFF_SEC,
+from audio import (
+    AudioSink,
+    BacklogController,
+    InputChunk,
+    InputGate,
+    SpeakerInput,
+    Subscription,
+    default_resampler_factory,
+)
+from config import Settings
+from crosstalk import CrossTalkDetector
+from events import RoomIO
+from metering import SessionMeter, percentile
+from providers.base import (
+    AudioOut,
+    GoAway,
+    ProviderError,
+    ProviderStream,
+    SegmentEnd,
+    StreamClosed,
+    StreamError,
+    TranscriptOut,
+    TranslationProvider,
 )
 
 logger = logging.getLogger("translator.session")
 
+OUTPUT_SAMPLE_RATE = 24000
+HEALTHY_STREAM_SEC = 10.0
+# Input transcripts arrive about once a second; keep dropping output this long
+# after the last one that said "already in the target language".
+SAME_LANGUAGE_HOLD_SEC = 3.0
+# After a cross-talk hold ends, the provider may still be voicing the overheard
+# speech (it lags the input by seconds). Keep dropping that audio until it
+# pauses for this long, unless the speaker's own words were just heard.
+CROSSTALK_TAIL_GAP_SEC = 1.2
+# Stall recovery (see Settings.stall_rotate_sec). Only while the provider is
+# still transcribing the speaker (a transcript in the last few seconds), after
+# enough words that a translation was clearly due, never on a stream younger
+# than this (a fresh stream can be slow to start; another would be slower),
+# and at most once per cooldown.
+STALL_HEARD_RECENT_SEC = 4.0
+STALL_MIN_WORDS = 6
+STALL_MIN_STREAM_AGE_SEC = 20.0
+STALL_COOLDOWN_SEC = 45.0
+# A pause, for switching streams without cutting anyone off: no translated
+# words (or voiced audio that came with words) for this long, and little
+# audio still queued for the listener.
+PAUSE_QUIET_SEC = 1.5
+PAUSE_TEXT_WITH_AUDIO_SEC = 4.0
+PAUSE_MAX_QUEUED_MS = 600
+# After the provider's GoAway: wait for a pause, but switch no later than this
+# before the announced close, and never wait longer than the cap.
+GOAWAY_SAFETY_SEC = 10.0
+GOAWAY_MAX_WAIT_SEC = 40.0
 
-GEMINI_WS_URL = (
-    "wss://generativelanguage.googleapis.com/ws/"
-    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-)
+
+@dataclass(frozen=True)
+class SessionKey:
+    gathering_id: str
+    group_id: str
+    speaker: str
+    target: str
+
+    def short(self) -> str:
+        return f"{self.speaker[:8]}->{self.target}"
 
 
-class GeminiSession:
-    """Bridges a single speaker's mic into a single target-language translation track.
+def translation_track_name(speaker: str, target: str) -> str:
+    return f"tx:{speaker}:{target}"
 
-    Lifecycle:
-      - `start()` publishes the translator track and starts the WS-pump loop.
-      - `aclose()` tears everything down. Idempotent.
-      - On WebSocket errors, reconnects with exponential backoff. After
-        `GEMINI_MAX_FAILURES_BEFORE_LONG_BACKOFF` consecutive failures it logs
-        at ERROR level and keeps retrying with the longest backoff.
-    """
+
+def comparison_track_name(speaker: str, target: str, provider: str) -> str:
+    return f"txc:{speaker}:{target}:{provider}"
+
+
+CaptionEmit = Callable[[str, dict[str, str]], None]
+
+
+class CaptionPublisher:
+    """Segments transcript chunks into utterances (contract §5.1).
+
+    `emit(text, attributes)` must not block: the session queues captions and
+    publishes them from a separate task so text never delays audio."""
 
     def __init__(
         self,
         *,
-        room: rtc.Room,
-        speaker_identity: str,
-        speaker_track: rtc.RemoteAudioTrack,
-        target_lang: str,
-        gemini_api_key: str,
+        emit: CaptionEmit,
+        kind: str,
+        speaker: str,
+        target: str,
+        gap_sec: float,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._room = room
-        self._speaker_identity = speaker_identity
-        self._speaker_track = speaker_track
-        self._target_lang = target_lang
-        self._gemini_api_key = gemini_api_key
+        self._emit = emit
+        self.kind = kind
+        self._speaker = speaker
+        self._target = target
+        self._gap = gap_sec
+        self._clock = clock
+        self.seg = 0
+        self._open = False
+        self._last_ts = 0.0
+        self.provider = ""
+        self.source_lang = ""
 
-        self._audio_source = make_audio_source()
-        self._local_track: rtc.LocalAudioTrack | None = None
-        self._track_sid: str | None = None
-        self._consecutive_failures = 0
-        self._tasks: list[asyncio.Task] = []
+    def _attrs(self, final: bool) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "source_identity": self._speaker,
+            "target_lang": self._target if self.kind == "translation" else "",
+            "source_lang": self.source_lang or "",
+            "final": "true" if final else "false",
+            "seg": str(self.seg),
+            "provider": self.provider,
+        }
+
+    def text(self, text: str) -> None:
+        if not text:
+            return
+        self._open = True
+        self._last_ts = self._clock()
+        self._emit(text, self._attrs(False))
+
+    def end_segment(self) -> None:
+        if not self._open:
+            return
+        self._emit("", self._attrs(True))
+        self._open = False
+        self.seg += 1
+
+    def retract(self, within_sec: float) -> None:
+        """Withdraw the current segment, or the one that ended within
+        `within_sec`: its text turned out to be a neighbour's voice re-voiced
+        in the listener's own language (contract §5.1 `retract`)."""
+        if self._open:
+            target = self.seg
+            self._open = False
+            self.seg += 1
+        elif self.seg > 0 and self._clock() - self._last_ts <= within_sec:
+            target = self.seg - 1
+        else:
+            return
+        attrs = self._attrs(True)
+        attrs["seg"] = str(target)
+        attrs["retract"] = "true"
+        self._emit("", attrs)
+
+    def tick(self) -> None:
+        if self._open and self._clock() - self._last_ts >= self._gap:
+            self.end_segment()
+
+
+class TranslationSession:
+    def __init__(
+        self,
+        *,
+        key: SessionKey,
+        speaker_input: SpeakerInput,
+        providers: list[TranslationProvider],
+        echo_target: bool,
+        room_io: RoomIO,
+        settings: Settings,
+        track_name: str | None = None,
+        publish_captions: bool = True,
+        publish_source: bool = False,
+        emit_events: bool = True,
+        crosstalk: CrossTalkDetector | None = None,
+        diag: Callable[..., None] | None = None,
+        speak_lang: str = "",
+        context: Callable[[], str | None] | None = None,
+        resampler_factory: Callable[[int, int], Any] = default_resampler_factory,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
+    ) -> None:
+        if not providers:
+            raise ValueError("at least one provider is required")
+        self.key = key
+        # Names card, rebuilt at every new stream (people join and leave).
+        self._context_fn = context
+        self._input = speaker_input
+        self._providers = providers
+        self._provider_idx = 0
+        self._echo = echo_target
+        self._io = room_io
+        self._settings = settings
+        self.track_name = track_name or translation_track_name(key.speaker, key.target)
+        self._publish_captions = publish_captions
+        self.publish_source = publish_source
+        self._emit_events = emit_events
+        self._resampler_factory = resampler_factory
+        self._clock = clock
+        self._sleep = sleep
+
+        self.state = "idle"
+        self.meters: list[SessionMeter] = []
+        self.meter = self._new_meter()
+        # Totals of meters replaced by a provider fallback (per-minute stats).
+        self._carried: dict[str, float] = {"out": 0.0, "inp": 0.0, "fa": 0}
+        self._sink: AudioSink | None = None
+        self._sid: str | None = None
+        self._sub: Subscription | None = None
+        self._gate: InputGate | None = None
+        self._current: ProviderStream | None = None
+        self._streams: set[ProviderStream] = set()
+        self._stream_started: dict[int, float] = {}
+        self._send_lock = asyncio.Lock()
+        self._pending: deque[InputChunk] = deque()
+        self._pending_ms = 0.0
+        self._last_sent_ts = clock()  # last audio (or keepalive) sent upstream
+        self._same_lang_until = 0.0  # drop output until then (input = target lang)
+        self.same_language_segments = 0
+        self.same_language_dropped_sec = 0.0
+        # Room-wide "same words on two mics" detector; exactly one session per
+        # speaker feeds it that speaker's input transcript (set by the router).
+        self._crosstalk = crosstalk
+        self.crosstalk_feed = False
+        self.crosstalk_dropped_sec = 0.0
+        self._crosstalk_tail_until = 0.0
+        # Content-free diagnostics (router -> control plane, kept 30 days).
+        self._diag_fn = diag
+        self.speak_lang = speak_lang
+        self._started_ts = clock()
+        self._minute: dict[str, Any] = {}
+        self._minute_ts = clock()
+        self._minute_backlog_max = 0.0
+        # Provider's input language labels, counts only (no text).
+        self.heard_languages: dict[str, int] = {}
+        self._need_reconnect = asyncio.Event()
         self._closed = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
+        self._receivers: set[asyncio.Task] = set()
+        self._rotating = False
+        self._failures = 0
+        self._backlog = BacklogController(
+            soft_ms=settings.backlog_soft_ms,
+            hard_ms=settings.backlog_hard_ms,
+            keep_silence_ms=settings.silence_trim_keep_ms,
+        )
+        self._out_resamplers: dict[int, Any] = {}
+        self._last_output_ts: float | None = None
+        self._last_measured_onset: float | None = None
+        self._stalls = 0
+        # Stall recovery: foreign speech the provider transcribed since its
+        # last output (when it started, when last heard, how many words).
+        self._awaiting_since: float | None = None
+        self._awaiting_heard_ts: float | None = None
+        self._awaiting_words = 0
+        self._last_unstick_ts = float("-inf")
+        self.stall_rotations = 0
+        self._last_output_text_ts: float | None = None
+        # A GoAway waiting for a pause (stream, latest switch time).
+        self._goaway_stream: ProviderStream | None = None
+        self._goaway_deadline = 0.0
+        self.connect_count = 0
+        self.rotations = 0
+        self.first_output_ts: float | None = None
+        self._outbox: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=500)
+        self._captions = CaptionPublisher(
+            emit=self._queue_caption,
+            kind="translation",
+            speaker=key.speaker,
+            target=key.target,
+            gap_sec=settings.caption_segment_gap_sec,
+            clock=clock,
+        )
+        self._source_captions = CaptionPublisher(
+            emit=self._queue_caption,
+            kind="source",
+            speaker=key.speaker,
+            target=key.target,
+            gap_sec=settings.caption_segment_gap_sec,
+            clock=clock,
+        )
 
-    # --- Public API ---------------------------------------------------------
+    # --- diagnostics -------------------------------------------------------------
+
+    def _diag(self, kind: str, **data: Any) -> None:
+        if self._diag_fn is None:
+            return
+        try:
+            self._diag_fn(kind, self.key.speaker, self.key.target, **data)
+        except Exception:  # pragma: no cover - diagnostics are best effort
+            logger.debug("diagnostics event failed", exc_info=True)
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            # Whole-session totals: the plain counters reset at every usage
+            # report, and the sample list keeps only the last 200.
+            "out": self._carried["out"] + self.meter.total_output_seconds,
+            "inp": self._carried["inp"] + self.meter.total_input_seconds,
+            "fa": self._carried["fa"] + self.meter.first_audio_count,
+            "heard": dict(self.heard_languages),
+            "same": self.same_language_dropped_sec,
+            "xt": self.crosstalk_dropped_sec,
+            "drop": self._backlog.dropped_ms,
+            "stalls": self._stalls,
+            "rot": self.rotations,
+            "unstick": self.stall_rotations,
+            "conn": self.connect_count,
+            "wh": getattr(self._input, "withheld_frames", 0),
+        }
+
+    def _minute_stats(self, now: float) -> None:
+        """Once a minute: what this stream did in the last minute (numbers only).
+        Shows drift over a long session: delay, the provider's language labels
+        (a speaker's own stream labelled in other languages = confusion), drops."""
+        snap = self._snapshot()
+        prev = self._minute or {k: (0 if k != "heard" else {}) for k in snap}
+        new_fa = int(snap["fa"] - prev["fa"])
+        samples = self.meter.all_first_audio_ms[-new_fa:] if new_fa > 0 else []
+        heard = {
+            lang: n - prev["heard"].get(lang, 0)
+            for lang, n in snap["heard"].items()
+            if n - prev["heard"].get(lang, 0) > 0
+        }
+        self._diag(
+            "minute",
+            age_min=round((now - self._started_ts) / 60, 1),
+            stream_age_s=round(
+                now - self._stream_started.get(id(self._current), now), 0
+            )
+            if self._current is not None
+            else 0,
+            output_s=round(snap["out"] - prev["out"], 1),
+            input_s=round(snap["inp"] - prev["inp"], 1),
+            first_audio_p50_ms=round(percentile(samples, 50)) if samples else -1,
+            first_audio_n=len(samples),
+            heard=heard,
+            same_language_dropped_s=round(snap["same"] - prev["same"], 1),
+            crosstalk_dropped_s=round(snap["xt"] - prev["xt"], 1),
+            backlog_dropped_ms=round(snap["drop"] - prev["drop"]),
+            backlog_max_ms=round(self._minute_backlog_max),
+            stalls=snap["stalls"] - prev["stalls"],
+            rotations=snap["rot"] - prev["rot"],
+            stall_rotations=snap["unstick"] - prev["unstick"],
+            reconnects=snap["conn"] - prev["conn"],
+            withheld_s=round((snap["wh"] - prev["wh"]) / 100, 1),
+            state=self.state,
+        )
+        self._minute = snap
+        self._minute_ts = now
+        self._minute_backlog_max = 0.0
+
+    # --- outbox (captions + events never block the audio path) ----------------
+
+    def _queue_caption(self, text: str, attributes: dict[str, str]) -> None:
+        self._enqueue(("caption", (text, attributes)))
+
+    def _queue_event(self, payload: dict[str, Any]) -> None:
+        if self._emit_events:
+            self._enqueue(("event", payload))
+
+    def _enqueue(self, item: tuple[str, Any]) -> None:
+        if self._outbox.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._outbox.get_nowait()  # drop the oldest; never block audio
+        self._outbox.put_nowait(item)
+
+    async def _outbox_worker(self) -> None:
+        while True:
+            kind, payload = await self._outbox.get()
+            try:
+                if kind == "caption":
+                    text, attrs = payload
+                    await self._io.publish_caption(
+                        text=text, sender_identity=self.key.speaker, attributes=attrs
+                    )
+                else:
+                    await self._io.publish_event(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                logger.debug("outbox publish failed: %s", exc)
+
+    async def _flush_outbox(self, timeout: float = 1.0) -> None:
+        deadline = self._clock() + timeout
+        while not self._outbox.empty() and self._clock() < deadline:
+            kind, payload = self._outbox.get_nowait()
+            with contextlib.suppress(Exception):
+                if kind == "caption":
+                    text, attrs = payload
+                    await self._io.publish_caption(
+                        text=text, sender_identity=self.key.speaker, attributes=attrs
+                    )
+                else:
+                    await self._io.publish_event(payload)
+
+    # --- properties ----------------------------------------------------------
+
+    @property
+    def provider(self) -> TranslationProvider:
+        return self._providers[self._provider_idx]
+
+    @property
+    def closed(self) -> bool:
+        return self._closed.is_set()
+
+    def _new_meter(self) -> SessionMeter:
+        m = SessionMeter(
+            speaker_id=self.key.speaker,
+            target_lang=self.key.target,
+            provider=self._providers[self._provider_idx].name,
+        )
+        self.meters.append(m)
+        return m
+
+    def take_usage_records(self) -> list[dict]:
+        records = []
+        for m in list(self.meters):
+            if not m.is_empty():
+                records.append(m.take_record())
+            if m is not self.meter:
+                self.meters.remove(m)
+        return records
+
+    def stats(self) -> dict[str, Any]:
+        samples = self.meter.all_first_audio_ms
+        p50 = percentile(samples, 50)
+        p95 = percentile(samples, 95)
+        return {
+            "speaker": self.key.speaker,
+            "target": self.key.target,
+            "provider": self.provider.name,
+            "firstAudioP50Ms": round(p50) if p50 is not None else None,
+            "firstAudioP95Ms": round(p95) if p95 is not None else None,
+            "backlogMs": round(self._sink.queued_ms()) if self._sink else 0,
+            "stalls": self._stalls,
+            "droppedMs": round(self._backlog.dropped_ms),
+        }
+
+    # --- lifecycle -----------------------------------------------------------
 
     async def start(self) -> None:
-        """Publish the translator track and start the connect-and-pump loop."""
-        track_name = f"tx:{self._speaker_identity}:{self._target_lang}"
-        self._local_track = rtc.LocalAudioTrack.create_audio_track(
-            track_name, self._audio_source
-        )
-        publish_opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE)
-
-        pub = await self._room.local_participant.publish_track(
-            self._local_track, publish_opts
-        )
-        self._track_sid = pub.sid
-
-        # Track-level attributes aren't yet exposed in this version of the
-        # livekit Python/JS SDKs, so routing is keyed off the track NAME
-        # ("tx:<speaker>:<lang>") which the frontend parses. See
-        # src/app/session/[id]/room/useTranslationRouting.ts.
-
+        self._sink = self._io.make_sink(OUTPUT_SAMPLE_RATE)
+        self._sid = await self._io.publish_audio(self.track_name, self._sink)
+        self._attach_input()
+        self._tasks = [
+            asyncio.create_task(self._run(), name=f"session/{self.key.short()}"),
+            asyncio.create_task(self._sender_loop(), name=f"sender/{self.key.short()}"),
+            asyncio.create_task(self._ticker(), name=f"ticker/{self.key.short()}"),
+            asyncio.create_task(
+                self._outbox_worker(), name=f"outbox/{self.key.short()}"
+            ),
+        ]
         logger.info(
-            "started translator track sid=%s name=%s for %s -> %s",
-            self._track_sid,
-            track_name,
-            self._speaker_identity,
-            self._target_lang,
+            "session started %s track=%s provider=%s echo=%s",
+            self.key.short(),
+            self.track_name,
+            self.provider.name,
+            self._echo,
+        )
+        self._started_ts = self._minute_ts = self._clock()
+        self._diag(
+            "session_started",
+            provider=self.provider.name,
+            echo=self._echo,
+            speak_lang=self.speak_lang,
+            comparison=not self._publish_captions,
         )
 
-        self._tasks.append(
-            asyncio.create_task(self._run(), name=f"session/{track_name}")
+    def _attach_input(self) -> None:
+        prov = self.provider
+        old = self._sub
+        self._sub = self._input.subscribe(
+            sample_rate=prov.input_sample_rate, chunk_ms=prov.chunk_ms
         )
+        self._gate = InputGate(
+            enabled=self._settings.input_gate and prov.capabilities.allows_input_gating,
+            pre_roll_ms=self._settings.gate_pre_roll_ms,
+            hangover_ms=self._settings.gate_hangover_ms,
+            chunk_ms=prov.chunk_ms,
+        )
+        self._pending.clear()
+        self._pending_ms = 0.0
+        if old is not None:
+            self._input.unsubscribe(old)
 
-    async def aclose(self) -> None:
+    async def aclose(self, reason: str = "stopped") -> None:
         if self._closed.is_set():
             return
         self._closed.set()
-
-        for task in self._tasks:
+        self._need_reconnect.set()
+        tasks = [*self._tasks, *self._receivers]
+        for task in tasks:
             task.cancel()
-        for task in self._tasks:
-            try:  # noqa: SIM105
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
-            except (asyncio.CancelledError, Exception):
-                pass
         self._tasks.clear()
-
-        # Unpublish and free the audio source.
-        if self._track_sid:
-            try:
-                await self._room.local_participant.unpublish_track(self._track_sid)
-            except Exception as exc:
-                logger.debug("unpublish failed for %s: %s", self._track_sid, exc)
-
-        with contextlib.suppress(Exception):
-            await self._audio_source.aclose()
-
+        self._receivers.clear()
+        streams = list(self._streams)
+        self._streams.clear()
+        self._current = None
+        await asyncio.gather(*(s.aclose() for s in streams), return_exceptions=True)
+        self.meter.mark_disconnected()
+        if self._sub is not None:
+            self._input.unsubscribe(self._sub)
+        if self._publish_captions:
+            self._captions.end_segment()
+            if self.publish_source:
+                self._source_captions.end_segment()
+        if self._sid is not None:
+            await self._io.unpublish(self._sid)
+        if self._sink is not None:
+            self._sink.clear()
+            await self._sink.aclose()
+        await self._set_state("stopped", reason=reason)
+        await self._flush_outbox()
         logger.info(
-            "closed translator session for %s -> %s",
-            self._speaker_identity,
-            self._target_lang,
+            "session closed %s (%s) heard_languages=%s same_language_dropped=%.1fs "
+            "crosstalk_dropped=%.1fs",
+            self.key.short(),
+            reason,
+            self.heard_languages,
+            self.same_language_dropped_sec,
+            self.crosstalk_dropped_sec,
+        )
+        samples = self.meter.all_first_audio_ms
+        p50, p95 = percentile(samples, 50), percentile(samples, 95)
+        self._diag(
+            "session_closed",
+            reason=reason,
+            minutes=round((self._clock() - self._started_ts) / 60, 1),
+            provider=self.provider.name,
+            heard=dict(self.heard_languages),
+            same_language_dropped_s=round(self.same_language_dropped_sec, 1),
+            crosstalk_dropped_s=round(self.crosstalk_dropped_sec, 1),
+            rotations=self.rotations,
+            stall_rotations=self.stall_rotations,
+            connects=self.connect_count,
+            stalls=self._stalls,
+            backlog_dropped_ms=round(self._backlog.dropped_ms),
+            first_audio_p50_ms=round(p50) if p50 is not None else -1,
+            first_audio_p95_ms=round(p95) if p95 is not None else -1,
+            first_audio_n=len(samples),
         )
 
-    # --- Internal pumps -----------------------------------------------------
+    # --- state/events ---------------------------------------------------------
+
+    async def _set_state(self, state: str, *, reason: str | None = None) -> None:
+        if state == self.state:
+            return
+        if state == "delayed":
+            self._stalls += 1
+        self.state = state
+        self._queue_event(
+            {
+                "t": "session",
+                "speaker": self.key.speaker,
+                "target": self.key.target,
+                "provider": self.provider.name,
+                "state": state,
+                "backlogMs": round(self._sink.queued_ms()) if self._sink else 0,
+                "reason": reason,
+            }
+        )
+
+    # --- main loop ---------------------------------------------------------------
 
     async def _run(self) -> None:
-        """Outer loop: connect, pump, reconnect on failure."""
+        first = True
         while not self._closed.is_set():
+            prov = self.provider
+            await self._set_state("connecting" if first else "reconnecting")
+            first = False
             try:
-                await self._connect_and_pump()
-                # If _connect_and_pump returns cleanly, the speaker track ended.
-                # Don't reconnect; rely on the router to clean us up.
-                return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._consecutive_failures += 1
-                idx = min(
-                    self._consecutive_failures - 1,
-                    len(GEMINI_RECONNECT_BACKOFF_SEC) - 1,
+                stream = await prov.connect(
+                    target_lang=self.key.target,
+                    echo_target=self._echo,
+                    context=self._context(),
                 )
-                delay = GEMINI_RECONNECT_BACKOFF_SEC[idx]
-                delay += random.uniform(0, delay * 0.2)  # jitter
-                if (
-                    self._consecutive_failures
-                    >= GEMINI_MAX_FAILURES_BEFORE_LONG_BACKOFF
-                ):
-                    logger.error(
-                        "Gemini session %s -> %s failed %d times; will keep retrying with long backoff",
-                        self._speaker_identity,
-                        self._target_lang,
-                        self._consecutive_failures,
-                    )
+            except ProviderError as exc:
+                self.meter.errors += 1
+                self._failures += 1
+                self._diag(
+                    "stream_error", code="connect_failed", retryable=exc.retryable
+                )
                 logger.warning(
-                    "Gemini session error (%s -> %s) attempt #%d: %s; backing off %.2fs",
-                    self._speaker_identity,
-                    self._target_lang,
-                    self._consecutive_failures,
+                    "connect failed %s via %s (#%d): %s",
+                    self.key.short(),
+                    prov.name,
+                    self._failures,
                     exc,
-                    delay,
                 )
-                try:
-                    await asyncio.wait_for(self._closed.wait(), timeout=delay)
-                    return  # closed during backoff
-                except asyncio.TimeoutError:
-                    pass
+                if await self._maybe_fallback(retryable=exc.retryable):
+                    continue
+                if not exc.retryable and self._provider_idx == len(self._providers) - 1:
+                    await self._set_state("error", reason=str(exc)[:120])
+                await self._backoff()
+                continue
 
-    async def _connect_and_pump(self) -> None:
-        """One Gemini WebSocket connect + bidirectional pump."""
-        url = f"{GEMINI_WS_URL}?key={self._gemini_api_key}"
-        # Max payload size: enough to cover ~1s of 48 kHz 16-bit PCM in base64.
-        async with websockets.connect(
-            url, max_size=2**22, ping_interval=20, ping_timeout=20
-        ) as ws:
-            await ws.send(json.dumps(self._build_setup_payload()))
-            logger.info(
-                "Gemini WS connected: %s -> %s, awaiting setupComplete",
-                self._speaker_identity,
-                self._target_lang,
-            )
+            self.connect_count += 1
+            await self._install(stream)
+            await self._set_state("live")
 
-            setup_complete = asyncio.Event()
-            send_task = asyncio.create_task(
-                self._pump_input(ws, setup_complete), name="gemini-input"
-            )
-            recv_task = asyncio.create_task(
-                self._pump_output(ws, setup_complete), name="gemini-output"
-            )
-
-            done, pending = await asyncio.wait(
-                {send_task, recv_task},
-                return_when=asyncio.FIRST_EXCEPTION,
-            )
-            for task in pending:
-                task.cancel()
-            for task in done:
-                exc = task.exception()
-                if exc is not None:
-                    raise exc
-
-    def _build_setup_payload(self) -> dict:
-        """The first WS message — must match the v1beta BidiGenerateContent setup
-        schema. Field names use the exact camelCase the API expects (verified
-        against the previous Node implementation that worked in production)."""
-        return {
-            "setup": {
-                "model": f"models/{GEMINI_MODEL}",
-                "outputAudioTranscription": {},
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "translationConfig": {
-                        "targetLanguageCode": self._target_lang,
-                        "echoTargetLanguage": False,
-                    },
-                },
-                "realtimeInputConfig": {
-                    "automaticActivityDetection": {"disabled": False},
-                },
-            }
-        }
-
-    async def _pump_input(
-        self,
-        ws: websockets.WebSocketClientProtocol,
-        setup_complete: asyncio.Event,
-    ) -> None:
-        """Read PCM from the speaker's track and forward to Gemini as base64."""
-        # Don't start streaming audio until Gemini acknowledges setup; otherwise
-        # the model has nothing telling it what to do with the bytes.
-        await setup_complete.wait()
-        sent = 0
-        mime = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
-        async for pcm in iter_pcm_for_gemini(self._speaker_track):
+            await self._need_reconnect.wait()
             if self._closed.is_set():
                 return
-            b64 = base64.b64encode(pcm).decode("ascii")
-            msg = {
-                "realtimeInput": {
-                    "audio": {
-                        "mimeType": mime,
-                        "data": b64,
-                    }
-                }
-            }
-            await ws.send(json.dumps(msg))
-            sent += 1
-            if sent in (1, 50) or sent % 500 == 0:
-                logger.info(
-                    "gemini <- %s frames=%d (%s mic in)",
-                    self._target_lang,
-                    sent,
-                    self._speaker_identity,
-                )
+            self._need_reconnect.clear()
+            failed = self._current
+            self._current = None
+            started = (
+                self._stream_started.get(id(failed), self._clock())
+                if failed
+                else self._clock()
+            )
+            if failed is not None:
+                await self._drop_stream(failed)
+            self.meter.mark_disconnected()
+            lived = self._clock() - started
+            if lived >= HEALTHY_STREAM_SEC:
+                self._failures = 0
+            else:
+                self._failures += 1
+            if await self._maybe_fallback(retryable=True):
+                continue
+            await self._backoff()
 
-    async def _pump_output(
-        self,
-        ws: websockets.WebSocketClientProtocol,
-        setup_complete: asyncio.Event,
-    ) -> None:
-        """Receive Gemini translated audio + transcription, route into the room."""
-        audio_frames = 0
-        text_chunks = 0
-        async for raw in ws:
-            if self._closed.is_set():
+    async def _backoff(self) -> None:
+        schedule = self._settings.reconnect_backoff_sec
+        idx = min(max(self._failures - 1, 0), len(schedule) - 1)
+        delay = schedule[idx]
+        if delay <= 0:
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._closed.wait(), timeout=delay)
+
+    async def _maybe_fallback(self, *, retryable: bool) -> bool:
+        threshold = self._settings.provider_failures_before_fallback
+        if self._provider_idx + 1 >= len(self._providers):
+            return False
+        if retryable and self._failures < threshold:
+            return False
+        old = self.provider.name
+        self._provider_idx += 1
+        self._failures = 0
+        self.meter.mark_disconnected()
+        self._carried["out"] += self.meter.total_output_seconds
+        self._carried["inp"] += self.meter.total_input_seconds
+        self._carried["fa"] += self.meter.first_audio_count
+        self.meter = self._new_meter()
+        self._attach_input()
+        logger.warning(
+            "session %s falling back %s -> %s",
+            self.key.short(),
+            old,
+            self.provider.name,
+        )
+        await self._set_state(
+            "reconnecting", reason=f"fallback:{old}->{self.provider.name}"
+        )
+        return True
+
+    async def _install(self, stream: ProviderStream) -> None:
+        """Make `stream` current, flushing audio buffered during the outage."""
+        self._streams.add(stream)
+        self._stream_started[id(stream)] = self._clock()
+        self.meter.mark_connected()
+        async with self._send_lock:
+            while self._pending:
+                chunk = self._pending.popleft()
+                try:
+                    await stream.send_audio(chunk.pcm)
+                    self.meter.input_seconds += chunk.duration_sec
+                except ProviderError:
+                    break
+            self._pending_ms = 0.0
+            self._current = stream
+            self._last_sent_ts = self._clock()  # a fresh stream restarts the idle timer
+        task = asyncio.create_task(
+            self._receive(stream), name=f"recv/{self.key.short()}"
+        )
+        self._receivers.add(task)
+        task.add_done_callback(self._receivers.discard)
+
+    async def _drop_stream(self, stream: ProviderStream) -> None:
+        self._streams.discard(stream)
+        self._stream_started.pop(id(stream), None)
+        with contextlib.suppress(Exception):
+            await stream.aclose()
+
+    # --- input ---------------------------------------------------------------
+
+    async def _sender_loop(self) -> None:
+        while not self._closed.is_set():
+            sub = self._sub
+            if sub is None:
+                await self._sleep(0.05)
+                continue
+            item = await sub.queue.get()
+            if item is None:
+                if sub is self._sub:
+                    return  # speaker input ended
+                continue  # subscription swapped (provider fallback)
+            if sub is not self._sub:
+                continue
+            assert self._gate is not None
+            for chunk in self._gate.process(item):
+                await self._send_chunk(chunk)
+
+    async def _send_chunk(self, chunk: InputChunk) -> None:
+        async with self._send_lock:
+            stream = self._current
+            if stream is None:
+                self._buffer_pending(chunk)
                 return
             try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                logger.debug("ignoring non-JSON WS frame")
-                continue
+                await stream.send_audio(chunk.pcm)
+                self.meter.input_seconds += chunk.duration_sec
+                self._last_sent_ts = self._clock()
+            except ProviderError as exc:
+                logger.debug("send failed %s: %s", self.key.short(), exc)
+                self._buffer_pending(chunk)
+                if stream is self._current:
+                    self._need_reconnect.set()
 
-            if msg.get("setupComplete") is not None:
-                logger.info(
-                    "Gemini setup complete: %s -> %s",
-                    self._speaker_identity,
-                    self._target_lang,
-                )
-                self._consecutive_failures = 0
-                setup_complete.set()
-                continue
+    def _buffer_pending(self, chunk: InputChunk) -> None:
+        self._pending.append(chunk)
+        self._pending_ms += chunk.duration_sec * 1000
+        limit = self._settings.reconnect_replay_ms
+        while self._pending and self._pending_ms > limit:
+            old = self._pending.popleft()
+            self._pending_ms -= old.duration_sec * 1000
 
-            sc = msg.get("serverContent")
-            if not sc:
-                continue
+    # --- output ---------------------------------------------------------------
 
-            # Translated audio frames.
-            model_turn = sc.get("modelTurn")
-            if model_turn is not None:
-                for part in model_turn.get("parts", []) or []:
-                    inline = part.get("inlineData")
-                    if inline and inline.get("data"):
-                        pcm = base64.b64decode(inline["data"])
-                        await push_pcm_to_source(self._audio_source, pcm)
-                        audio_frames += 1
-                        if audio_frames in (1, 10, 100) or audio_frames % 500 == 0:
-                            logger.info(
-                                "gemini -> %s frames=%d (%s -> %s)",
-                                self._target_lang,
-                                audio_frames,
-                                self._speaker_identity,
-                                self._target_lang,
-                            )
-
-            # Translated transcript -> text stream for the captions sidebar.
-            ot = sc.get("outputTranscription")
-            if ot and ot.get("text"):
-                await self._publish_transcript(ot["text"], final=False)
-                text_chunks += 1
-                if text_chunks in (1, 10) or text_chunks % 50 == 0:
-                    logger.info(
-                        "gemini transcript chunk #%d for %s -> %s: %r",
-                        text_chunks,
-                        self._speaker_identity,
-                        self._target_lang,
-                        ot["text"][:60],
-                    )
-
-            if sc.get("turnComplete"):
-                await self._publish_transcript("", final=True)
-
-    async def _publish_transcript(self, text: str, *, final: bool) -> None:
-        """Best-effort text-stream publish. Frontend filters by attributes."""
-        if not text and not final:
-            return
+    async def _receive(self, stream: ProviderStream) -> None:
         try:
-            # Send each chunk as its own text-stream message; frontend appends.
-            writer = await self._room.local_participant.stream_text(
-                topic="lk.translation",
-                sender_identity=self._speaker_identity,
-                attributes={
-                    "target_lang": self._target_lang,
-                    "source_identity": self._speaker_identity,
-                    "final": "true" if final else "false",
-                },
+            async for ev in stream.events():
+                if self._closed.is_set():
+                    return
+                if isinstance(ev, AudioOut):
+                    await self._on_audio(ev)
+                elif isinstance(ev, TranscriptOut):
+                    await self._on_transcript(ev)
+                elif isinstance(ev, SegmentEnd):
+                    if self._publish_captions:
+                        self._captions.end_segment()
+                        if self.publish_source:
+                            self._source_captions.end_segment()
+                elif isinstance(ev, GoAway):
+                    self._on_goaway(stream, ev.time_left_sec)
+                elif isinstance(ev, StreamError):
+                    self.meter.errors += 1
+                    logger.warning("stream error %s: %s", self.key.short(), ev.message)
+                    self._diag(
+                        "stream_error",
+                        code=(str(ev.code) or "none")[:32].replace(" ", "_"),
+                        retryable=ev.retryable,
+                    )
+                    if not ev.retryable:
+                        self._failures = (
+                            self._settings.provider_failures_before_fallback
+                        )
+                elif isinstance(ev, StreamClosed):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("receiver crashed %s", self.key.short())
+        if stream is self._current and not self._closed.is_set():
+            self._need_reconnect.set()
+        elif stream is not self._current:
+            await self._drop_stream(stream)
+
+    def _context(self) -> str | None:
+        if self._context_fn is None:
+            return None
+        try:
+            return self._context_fn()
+        except Exception:  # pragma: no cover - the card is optional
+            logger.debug("context card failed", exc_info=True)
+            return None
+
+    def _at_a_pause(self, now: float) -> bool:
+        """The speaker is quiet and the provider has finished voicing.
+
+        "Voicing" is judged by the provider's words, not only its audio: a
+        Live Translate stream sends audio all the time, and some streams'
+        "silence" is faint noise above the silence threshold (production
+        30-min run 2026-11-18: one stream looked busy for 9 minutes, so its
+        refresh never came). Audible output counts as voicing only while
+        output text came with it in the last few seconds."""
+        if self._input.speech_active:
+            return False
+        text_ts = self._last_output_text_ts
+        if text_ts is not None and now - text_ts < PAUSE_QUIET_SEC:
+            return False
+        audio_ts = self._last_output_ts
+        if (
+            audio_ts is not None
+            and now - audio_ts < PAUSE_QUIET_SEC
+            and (text_ts is None or now - text_ts < PAUSE_TEXT_WITH_AUDIO_SEC)
+        ):
+            return False
+        return self._sink is None or self._sink.queued_ms() <= PAUSE_MAX_QUEUED_MS
+
+    def _maybe_refresh(self, now: float) -> None:
+        """Fresh provider memory every `stream_refresh_sec`, at a pause."""
+        every = self._settings.stream_refresh_sec
+        cur = self._current
+        if every <= 0 or cur is None or self._rotating or self._closed.is_set():
+            return
+        if now - self._stream_started.get(id(cur), now) < every:
+            return
+        if not self._at_a_pause(now):
+            return
+        self._start_rotation(cur, "refresh")
+
+    def _on_goaway(self, stream: ProviderStream, time_left: float | None) -> None:
+        """The provider will close this stream soon (Gemini: ~50 s ahead, about
+        9 minutes in). Switch at the next pause inside that warning instead of
+        at once: an immediate switch lands mid-sentence (production run
+        2026-11-18: the stream that took over mid-speech misheard the
+        speaker's name for the rest of its life)."""
+        if stream is not self._current or self._rotating:
+            return
+        wait = 0.0
+        if time_left is not None:
+            wait = max(0.0, min(time_left - GOAWAY_SAFETY_SEC, GOAWAY_MAX_WAIT_SEC))
+        if wait <= 0:
+            self._start_rotation(stream, "goaway")
+            return
+        self._goaway_stream = stream
+        self._goaway_deadline = self._clock() + wait
+
+    def _maybe_goaway(self, now: float) -> None:
+        stream = self._goaway_stream
+        if stream is None:
+            return
+        if stream is not self._current or self._rotating or self._closed.is_set():
+            self._goaway_stream = None
+            return
+        if self._at_a_pause(now) or now >= self._goaway_deadline:
+            self._goaway_stream = None
+            self._start_rotation(
+                stream, "goaway" if now < self._goaway_deadline else "goaway_deadline"
             )
-            if text:
-                await writer.write(text)
-            await writer.aclose()
-        except Exception as exc:
-            logger.debug("text-stream publish failed: %s", exc)
+
+    def _start_rotation(self, stream: ProviderStream, why: str) -> None:
+        task = asyncio.create_task(self._rotate(stream, why=why))
+        self._receivers.add(task)
+        task.add_done_callback(self._receivers.discard)
+
+    def _note_awaiting(self, ev: TranscriptOut) -> None:
+        """Input the provider should be answering: speech it labels in another
+        language than this session's target (any language for echo sessions).
+        Unlabelled or target-language speech is never counted: the provider
+        rightly stays silent for it, and a rotation would only cost time."""
+        if not ev.lang or not ev.text.strip() or self._crosstalk_held():
+            return
+        heard = ev.lang.split("-")[0].lower()
+        if not self._echo and heard == self.key.target.split("-")[0].lower():
+            return
+        now = self._clock()
+        if self._awaiting_since is None:
+            self._awaiting_since = now
+            self._awaiting_words = 0
+        self._awaiting_heard_ts = now
+        self._awaiting_words += len(ev.text.split())
+
+    def _answered(self) -> None:
+        self._awaiting_since = None
+        self._awaiting_words = 0
+
+    def _maybe_unstick(self, now: float) -> None:
+        """A stream that keeps hearing foreign speech but has said nothing for
+        `stall_rotate_sec` is stuck: switch to a fresh one (make-before-break)."""
+        after = self._settings.stall_rotate_sec
+        cur = self._current
+        if after <= 0 or cur is None or self._rotating or self._closed.is_set():
+            return
+        since = self._awaiting_since
+        if since is None or now - since < after:
+            return
+        if self._awaiting_words < STALL_MIN_WORDS:
+            return
+        heard = self._awaiting_heard_ts
+        if heard is None or now - heard > STALL_HEARD_RECENT_SEC:
+            return  # the speaker paused; decide when they speak again
+        if now - self._stream_started.get(id(cur), now) < STALL_MIN_STREAM_AGE_SEC:
+            return
+        if now - self._last_unstick_ts < STALL_COOLDOWN_SEC:
+            return
+        silent_s = now - since
+        words = self._awaiting_words
+        self._last_unstick_ts = now
+        self.stall_rotations += 1
+        self._answered()
+        logger.warning(
+            "provider stream stuck %s: %d words heard, no output for %.0f s; rotating",
+            self.key.short(),
+            words,
+            silent_s,
+        )
+        self._diag("stall", silent_s=round(silent_s, 1), words=words)
+        self._start_rotation(cur, "stall")
+
+    async def _rotate(self, old: ProviderStream, why: str = "goaway") -> None:
+        """Make-before-break: open a new stream, switch input, drain the old one."""
+        self._rotating = True
+        age = self._clock() - self._stream_started.get(id(old), self._clock())
+        try:
+            try:
+                new = await self.provider.connect(
+                    target_lang=self.key.target,
+                    echo_target=self._echo,
+                    context=self._context(),
+                )
+            except ProviderError as exc:
+                logger.warning("rotation connect failed %s: %s", self.key.short(), exc)
+                self._diag("stream_error", code="rotation_connect_failed", why=why)
+                return
+            self.rotations += 1
+            self.connect_count += 1
+            await self._install(new)
+            logger.info(
+                "rotated provider stream %s (%s, after %.0f s)",
+                self.key.short(),
+                why,
+                age,
+            )
+            self._diag("rotation", why=why, age_s=round(age))
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    self._closed.wait(), timeout=self._settings.rotation_drain_sec
+                )
+            if old in self._streams:
+                await self._drop_stream(old)
+        finally:
+            self._rotating = False
+
+    def _crosstalk_held(self) -> bool:
+        return self._crosstalk is not None and self._crosstalk.is_held(self.key.speaker)
+
+    def crosstalk_started(self) -> None:
+        """This speaker's mic was just found carrying someone else's words:
+        stop what is queued and withdraw captions already on screen."""
+        if self._sink is not None:
+            self._sink.clear()
+        if self._publish_captions:
+            self._captions.retract(SAME_LANGUAGE_HOLD_SEC)
+            if self.publish_source:
+                self._source_captions.retract(SAME_LANGUAGE_HOLD_SEC)
+
+    async def _on_audio(self, ev: AudioOut) -> None:
+        assert self._sink is not None
+        now = self._clock()
+        if self._awaiting_since is not None and not self._backlog.is_silent(ev.pcm):
+            self._answered()  # the provider is answering, even if dropped below
+        if now < self._same_lang_until:
+            self.meter.output_seconds += ev.duration_sec  # still billed upstream
+            self.same_language_dropped_sec += ev.duration_sec
+            return
+        if self._crosstalk_held() or (
+            now < self._crosstalk_tail_until
+            and self._crosstalk is not None
+            and not self._crosstalk.speaking_own(self.key.speaker)
+        ):
+            self.meter.output_seconds += ev.duration_sec  # still billed upstream
+            self.crosstalk_dropped_sec += ev.duration_sec
+            if not self._backlog.is_silent(ev.pcm):
+                self._crosstalk_tail_until = now + CROSSTALK_TAIL_GAP_SEC
+            return
+        pcm = ev.pcm
+        if ev.sample_rate != OUTPUT_SAMPLE_RATE:
+            rs = self._out_resamplers.get(ev.sample_rate)
+            if rs is None:
+                rs = self._resampler_factory(ev.sample_rate, OUTPUT_SAMPLE_RATE)
+                self._out_resamplers[ev.sample_rate] = rs
+            pcm = rs.push(pcm)
+        self.meter.output_seconds += ev.duration_sec
+        if not self._backlog.is_silent(pcm):
+            # Latency and liveness are measured on AUDIBLE output only.
+            self._measure_first_audio(now)
+            self._last_output_ts = now
+            if self.first_output_ts is None:
+                self.first_output_ts = now
+        out = self._backlog.process(
+            pcm, sample_rate=OUTPUT_SAMPLE_RATE, queued_ms=self._sink.queued_ms()
+        )
+        if out:
+            await self._sink.write(out)
+        backlog = self._sink.queued_ms()
+        self._minute_backlog_max = max(self._minute_backlog_max, backlog)
+        if backlog >= self._settings.backlog_soft_ms:
+            await self._set_state("delayed", reason="backlog")
+        elif self.state == "delayed":
+            await self._set_state("live")
+
+    def _measure_first_audio(self, now: float) -> None:
+        onset = self._input.last_onset_ts
+        if onset is None or onset == self._last_measured_onset:
+            return
+        self._last_measured_onset = onset
+        idle_before = (
+            self._last_output_ts is None or onset - self._last_output_ts >= 1.0
+        )
+        if not idle_before or now < onset:
+            return  # previous translation still playing; latency not measurable
+        latency_ms = (now - onset) * 1000.0
+        self.meter.add_first_audio(latency_ms)
+        self._queue_event(
+            {
+                "t": "first_audio",
+                "speaker": self.key.speaker,
+                "target": self.key.target,
+                "provider": self.provider.name,
+                "latencyMs": round(latency_ms),
+            }
+        )
+
+    def _note_input_language(self, ev: TranscriptOut) -> None:
+        """Second line of defence against same-room bleed.
+
+        If the provider says the speech it is hearing is ALREADY in this
+        session's target language, voicing it would only repeat it, and at a
+        shared table it is almost always a neighbour's voice leaking into this
+        mic (live test 2026-11-17: leaked, reverberant Spanish was labelled
+        'es'/'it' and re-voiced into Spanish, so the listener heard their own
+        words back; `echoTargetLanguage=false` alone did not stop it). Output is
+        dropped while such input continues. Never applied to echo sessions
+        ("I switch languages" speakers), where repeating is intended."""
+        if ev.kind != "input" or not ev.lang:
+            return
+        heard = ev.lang.split("-")[0].lower()
+        self.heard_languages[heard] = self.heard_languages.get(heard, 0) + 1
+        if self._echo:
+            return
+        # Only the target-language rule: it is safe on real speech (a listener
+        # understands their own language). A "foreign label" rule was tried and
+        # removed: Gemini's labels for leaked audio are unstable between runs
+        # (a neighbour's Polish came back as 'es', a speaker's own Polish as
+        # 'en'), so it dropped real translations.
+        if heard == self.key.target.split("-")[0].lower():
+            now = self._clock()
+            if now >= self._same_lang_until and self._publish_captions:
+                # Captions of this voice may have gone out before its language
+                # label arrived (live test 2026-11-17: the audio was dropped,
+                # but the text stayed on screen under the wrong name).
+                self._captions.retract(SAME_LANGUAGE_HOLD_SEC)
+            self._same_lang_until = now + SAME_LANGUAGE_HOLD_SEC
+            self.same_language_segments += 1
+        else:
+            self._same_lang_until = 0.0
+
+    async def _on_transcript(self, ev: TranscriptOut) -> None:
+        self._note_input_language(ev)
+        if ev.kind == "input" and self.crosstalk_feed and self._crosstalk is not None:
+            # May mark this speaker (or the one they overhear) as leaking.
+            self._crosstalk.note_input(self.key.speaker, ev.text, ev.lang)
+        if ev.kind == "input":
+            self._note_awaiting(ev)
+        elif ev.text.strip():
+            self._last_output_text_ts = self._clock()
+            self._answered()
+        if not self._publish_captions:
+            return
+        if ev.kind == "output" and self._clock() < self._same_lang_until:
+            return
+        if self._crosstalk_held():
+            return  # neither the overheard words nor their translation
+        provider = self.provider.name
+        self._captions.provider = provider
+        self._source_captions.provider = provider
+        if ev.kind == "input":
+            if ev.lang:
+                self._captions.source_lang = ev.lang
+                self._source_captions.source_lang = ev.lang
+            if self.publish_source:
+                self._source_captions.text(ev.text)
+        else:
+            self._captions.text(ev.text)
+
+    async def _maybe_keepalive(self) -> None:
+        """Keep a quiet speaker's provider stream open.
+
+        Gemini closes a stream after 120 s without input ("client inactivity"),
+        and the input gate withholds silence, so without this a participant who
+        listens for a while would have their stream dropped and reopened every
+        two minutes, and their first words could land in the reconnect gap.
+        One silent chunk per `stream_keepalive_sec` prevents that."""
+        every = self._settings.stream_keepalive_sec
+        if every <= 0 or self._clock() - self._last_sent_ts < every:
+            return
+        prov = self.provider
+        samples = prov.input_sample_rate * prov.chunk_ms // 1000
+        async with self._send_lock:
+            stream = self._current
+            if stream is None:
+                return
+            try:
+                await stream.send_audio(b"\x00\x00" * samples)
+            except ProviderError:
+                return  # the receiver sees the close and reconnects
+            self.meter.input_seconds += prov.chunk_ms / 1000
+            self._last_sent_ts = self._clock()
+
+    async def _ticker(self) -> None:
+        """1 Hz housekeeping: caption segmentation and 'delayed' detection."""
+        while not self._closed.is_set():
+            await self._sleep(1.0)
+            await self._maybe_keepalive()
+            if self._publish_captions:
+                self._captions.tick()
+                if self.publish_source:
+                    self._source_captions.tick()
+            tick_now = self._clock()
+            if tick_now - self._minute_ts >= 60.0:
+                self._minute_stats(tick_now)
+            self._maybe_goaway(tick_now)
+            self._maybe_refresh(tick_now)
+            self._maybe_unstick(tick_now)
+            if self.state not in ("live", "delayed"):
+                continue
+            now = self._clock()
+            onset = self._input.last_onset_ts
+            speaking = self._input.speech_active
+            waiting_since = max(
+                x for x in (onset, self._last_output_ts, 0.0) if x is not None
+            )
+            if (
+                speaking
+                and onset is not None
+                and now - waiting_since > self._settings.delayed_no_output_sec
+            ):
+                await self._set_state("delayed", reason="no_output")

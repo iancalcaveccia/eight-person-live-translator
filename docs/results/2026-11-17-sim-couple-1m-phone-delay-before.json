@@ -1,0 +1,120 @@
+{
+  "date_utc": "2026-11-17T17:06:12Z",
+  "app_host": "eight-person-live-translator.vercel.app",
+  "people": [
+    "Ian speaks es, hears es",
+    "Partner speaks pl, hears pl"
+  ],
+  "bleed_db": -20.0,
+  "phone_delay_ms": [
+    0.0,
+    250.0
+  ],
+  "published_in_real_time": true,
+  "publish_time_ratio": 1.0,
+  "translations_expected": 6,
+  "translations_heard": 6,
+  "all_began_before_speaker_stopped": false,
+  "first_audio_median_s": 3.65,
+  "first_audio_max_s": 5.17,
+  "phantom_total_s": 26.71,
+  "phantom_caption_segments_total": 2,
+  "expected": [
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 40.2,
+      "speech_s": 29.7,
+      "first_audio_s": 3.56,
+      "began_before_speaker_stopped": true,
+      "heard_s": 24.1
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 85.2,
+      "speech_s": 1.7,
+      "first_audio_s": 3.62,
+      "began_before_speaker_stopped": false,
+      "heard_s": 4.7
+    },
+    {
+      "speaker": "Partner",
+      "listener": "Ian",
+      "pair": "pl->es",
+      "at_s": 105.2,
+      "speech_s": 11.7,
+      "first_audio_s": 3.67,
+      "began_before_speaker_stopped": true,
+      "heard_s": 8.3
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 3.0,
+      "speech_s": 29.7,
+      "first_audio_s": 3.43,
+      "began_before_speaker_stopped": true,
+      "heard_s": 20.0
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 77.0,
+      "speech_s": 19.7,
+      "first_audio_s": 4.11,
+      "began_before_speaker_stopped": true,
+      "heard_s": 15.1
+    },
+    {
+      "speaker": "Ian",
+      "listener": "Partner",
+      "pair": "es->pl",
+      "at_s": 105.0,
+      "speech_s": 11.7,
+      "first_audio_s": 5.17,
+      "began_before_speaker_stopped": true,
+      "heard_s": 9.2
+    }
+  ],
+  "phantoms": [
+    {
+      "track_of": "Partner",
+      "heard_by": "Ian",
+      "language": "es",
+      "phantom_s": 4.27,
+      "phantom_at_s": [
+        "95.3-100.7"
+      ],
+      "phantom_caption_segments": 0,
+      "phantom_caption_chars": 0,
+      "phantom_caption_at_s": [],
+      "retracted_segments": 0,
+      "subscribed": true
+    },
+    {
+      "track_of": "Ian",
+      "heard_by": "Partner",
+      "language": "pl",
+      "phantom_s": 22.44,
+      "phantom_at_s": [
+        "43.1-44.7",
+        "47.8-73.9"
+      ],
+      "phantom_caption_segments": 2,
+      "phantom_caption_chars": 365,
+      "phantom_caption_at_s": [
+        42.2,
+        47.4
+      ],
+      "retracted_segments": 0,
+      "subscribed": true
+    }
+  ],
+  "host": "Windows-11-10.0.26300-SP0",
+  "note": "Synthetic voices and synthetic room bleed; not a phone/Bluetooth test."
+}

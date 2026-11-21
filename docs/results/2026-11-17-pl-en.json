@@ -1,0 +1,54 @@
+{
+  "date_utc": "2026-11-17T12:56:59Z",
+  "room": "grp_wfzse3l2pynspvvqbvjgch7p",
+  "livekit_url_host": "translator-5tgch5b0.livekit.cloud",
+  "mode": "deployed app (real control plane + deployed worker)",
+  "app_host": "eight-person-live-translator.vercel.app",
+  "agent_name": "gemini-translator (deployed)",
+  "pair": "pl->en",
+  "clip": "pl_from_gemini.wav",
+  "repetitions": 2,
+  "repetitions_published_in_real_time": 2,
+  "first_audio_p50_s": 3.703,
+  "first_audio_p95_s": 4.04,
+  "first_audio_mean_s": 3.703,
+  "began_before_source_end_all": true,
+  "interjection_p50_s": null,
+  "interjection_p95_s": null,
+  "worker_first_audio_ms": [
+    3157,
+    3461
+  ],
+  "worker_session_states": [
+    "connecting",
+    "connecting",
+    "live",
+    "live"
+  ],
+  "host": "Windows-11-10.0.26300-SP0",
+  "reps": [
+    {
+      "rep": 1,
+      "published_in_real_time": true,
+      "publish_time_ratio": 1.0,
+      "source_speech_s": 33.12,
+      "first_translated_audio_s": 3.328,
+      "began_before_source_end": true,
+      "translated_speech_heard_before_source_end_s": 24.29,
+      "source_speech_frames_s": 27.46,
+      "end_catch_up_s": 2.843
+    },
+    {
+      "rep": 2,
+      "published_in_real_time": true,
+      "publish_time_ratio": 1.0,
+      "source_speech_s": 33.12,
+      "first_translated_audio_s": 4.078,
+      "began_before_source_end": true,
+      "translated_speech_heard_before_source_end_s": 23.12,
+      "source_speech_frames_s": 27.46,
+      "end_catch_up_s": 2.922
+    }
+  ],
+  "note": "Synthetic participants on this host; not a phone/Bluetooth measurement."
+}
